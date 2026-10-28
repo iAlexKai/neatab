@@ -79,8 +79,21 @@ export function inactiveTabs(tabs, seen, now, threshold = INACTIVE_MS) {
     .sort((a, b) => a.lastActive - b.lastActive || a.windowId - b.windowId || a.index - b.index);
 }
 
+// Idle buckets on the inactive view, oldest first. `min` is the bucket's lower bound.
+export const IDLE_GROUPS = [
+  {id: 'over48', label: '48 小时以上', min: 48 * 3600000},
+  {id: 'h24to48', label: '24 – 48 小时', min: 24 * 3600000},
+  {id: 'h12to24', label: '12 – 24 小时', min: INACTIVE_MS},
+  {id: 'under12', label: '12 小时以内', min: 0}
+];
+
+export function idleGroup(ms) {
+  return IDLE_GROUPS.find(group => ms >= group.min) || IDLE_GROUPS.at(-1);
+}
+
 export function idleLabel(ms) {
   const hours = Math.floor(ms / 3600000);
+  if (hours < 1) return ms < 60000 ? '刚刚访问' : `${Math.floor(ms / 60000)} 分钟未访问`;
   if (hours < 24) return `${hours} 小时未访问`;
   const days = Math.floor(hours / 24);
   return days < 30 ? `${days} 天未访问` : '超过 30 天未访问';

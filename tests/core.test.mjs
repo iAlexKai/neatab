@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {RecentTabs, cycle, displayHost, supportsCopyLink, supportsCopyToast, inactiveTabs, idleLabel, duplicateTabs, INACTIVE_MS} from '../extension/core.mjs';
+import {RecentTabs, cycle, displayHost, supportsCopyLink, supportsCopyToast, inactiveTabs, idleLabel, idleGroup, duplicateTabs, INACTIVE_MS} from '../extension/core.mjs';
 
 const tabs = Array.from({length: 12}, (_, n) => ({id: n + 1, windowId: n < 8 ? 1 : 2,
   index: n, title: `Tab ${n + 1}`, lastAccessed: 100 - n}));
@@ -70,4 +70,11 @@ test('duplicates: on-screen copy wins, then latest activity; pinned and audible 
   const {keep, close} = duplicateTabs(list, {1: 40});
   assert.deepEqual([...keep].sort(), [1, 3, 4, 5]);
   assert.deepEqual([...close].sort(), [2, 6]);
+});
+test('idle groups: boundaries belong to the older group', () => {
+  const hour = 3600000;
+  assert.deepEqual([0, 11.9, 12, 23.9, 24, 47.9, 48, 500].map(h => idleGroup(h * hour).id),
+    ['under12', 'under12', 'h12to24', 'h12to24', 'h24to48', 'h24to48', 'over48', 'over48']);
+  assert.equal(idleLabel(30000), '刚刚访问');
+  assert.equal(idleLabel(25 * 60000), '25 分钟未访问');
 });

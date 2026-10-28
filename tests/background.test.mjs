@@ -46,7 +46,7 @@ async function harness() {
       return {size:3,arrayBuffer:async()=>Uint8Array.from([255,216,255]).buffer};
     }
   }
-  const context = vm.createContext({chrome,RecentTabs,LIMIT,safeURL,inactiveTabs,duplicateTabs,lastActive,console,performance,URL,Date:Clock,Map,Set,Uint8Array,TextEncoder,structuredClone,btoa,
+  const context = vm.createContext({chrome,RecentTabs,LIMIT,safeURL,inactiveTabs,duplicateTabs,lastActive,INACTIVE_MS,console,performance,URL,Date:Clock,Map,Set,Uint8Array,TextEncoder,structuredClone,btoa,
     fetch:async()=>({blob:async()=>({})}),OffscreenCanvas:Canvas,
     createImageBitmap:async()=>({width:1920,height:1080,close(){bitmapClosed++;}}),
     setTimeout:(fn,delay)=>{timers.set(++timerId,{fn,delay});return timerId;},clearTimeout:id=>timers.delete(id)});
@@ -223,14 +223,14 @@ test('copying an empty URL does not return text that would clear the clipboard',
   const result=h.sent.findLast(m=>m.type==='copy-url-result');
   assert.ok(result.error);assert.equal(result.url,undefined);
 });
-test('tabs left more than 12 hours ago are listed oldest first; active, pinned and audible are kept',async()=>{
+test('inactive view lists every closable tab oldest first; active, pinned and audible are kept',async()=>{
   const h=await harness();
   h.data.forEach(t=>{t.lastAccessed=10000;});
   h.data[2].pinned=true;h.data[3].audible=true;
   h.advance(INACTIVE_MS);
   h.data[4].lastAccessed=h.data[5].lastAccessed=12000; // touched later: not yet 12 hours idle
   const result=await h.request({type:'inactive'});
-  assert.deepEqual(result.items.map(t=>t.id),[2,7,8,10]);
+  assert.deepEqual(result.items.map(t=>t.id),[2,7,8,10,5,6]);
   assert.equal((await h.request({type:'state'})).inactiveCount,4);
 });
 test('leaving a tab counts as activity even when Chrome lastAccessed is older',async()=>{
@@ -240,7 +240,8 @@ test('leaving a tab counts as activity even when Chrome lastAccessed is older',a
   h.data[0].active=false;h.data[1].active=true;
   h.chrome.tabs.onActivated.fire({tabId:2,windowId:1});await flush();
   h.advance(2000);
-  const ids=(await h.request({type:'inactive'})).items.map(t=>t.id);
+  const {items,now}=await h.request({type:'inactive'});
+  const ids=items.filter(t=>now-t.lastActive>=INACTIVE_MS).map(t=>t.id);
   assert.ok(!ids.includes(1));assert.ok(ids.includes(3));
 });
 test('close all re-checks targets and only closes tabs still inactive, then undo reopens them in place',async()=>{
@@ -298,4 +299,26 @@ test('single close only closes an open normal tab, and the manager page is not l
   assert.deepEqual((await h.request({type:'close-tab',id:999})).closed,[]);
   await h.request({type:'close-tab',id:5});
   assert.deepEqual(h.operations,[['remove',5]]);
+});
+test('group close only closes tabs still at least as idle as the group, so recent use protects them',async()=>{
+  const h=await harness();
+  const hour=3600000;
+  h.data.forEach(t=>{t.lastAccessed=10000;});
+  h.advance(60*hour);
+  const now=10000+60*hour;
+  h.data[1].lastAccessed=now-50*hour; // tab 2: 48h+
+  h.data[2].lastAccessed=now-30*hour; // tab 3: 24–48h
+  h.data[3].lastAccessed=now-30*hour; // tab 4: 24–48h, used again below
+  h.data[4].lastAccessed=now-2*hour;  // tab 5: under 12h
+  await h.request({type:'close-inactive',ids:[2,3,4,5],minIdle:24*hour}).then(r=>{
+    assert.deepEqual(h.operations,[['remove',2,3,4]]);
+    assert.equal(r.closed.length,3);
+  });
+  h.data.find(t=>t.id===6).lastAccessed=now-1*hour;  // tab 6 now recent: a 24h group close must skip it
+  await h.request({type:'close-inactive',ids:[6,7],minIdle:24*hour});
+  assert.deepEqual(h.operations[1],['remove',7]);
+  await h.request({type:'close-inactive',ids:[5,6],minIdle:0});
+  assert.deepEqual(h.operations[2],['remove',5,6]);
+  await h.request({type:'close-inactive',ids:[8],minIdle:'bogus'});
+  assert.deepEqual(h.operations[3],['remove',8]); // invalid bound falls back to 12 hours; tab 8 is 60h idle
 });

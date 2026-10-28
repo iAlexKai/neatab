@@ -1,11 +1,11 @@
-import {displayHost, idleLabel} from './core.mjs';
+import {displayHost, idleLabel, idleGroup, IDLE_GROUPS, INACTIVE_MS} from './core.mjs';
 const $ = id => document.getElementById(id);
 const send = message => chrome.runtime.sendMessage(message);
 const VIEWS = {
   all: {heading: '所有标签页', note: '按窗口和标签栏顺序列出当前打开的标签页。地址完全相同的视为重复，只保留最近活跃的一个；正在显示、已固定或正在播放声音的不会被关闭。',
     emptyTitle: '没有打开的标签页', emptyText: ''},
-  inactive: {heading: '不活跃标签页', note: '超过 12 小时没有切换到的标签页。正在显示、已固定或正在播放声音的标签页不会列出。',
-    emptyTitle: '没有闲置的标签页', emptyText: '最近 12 小时内访问过所有打开的标签页。'}
+  inactive: {heading: '不活跃标签页', note: '按多久没有切换到分组，可以按组关闭。「全部关闭」只关闭超过 12 小时未访问的标签页。正在显示、已固定或正在播放声音的标签页不会列出。',
+    emptyTitle: '没有可整理的标签页', emptyText: '除了正在显示、已固定或正在播放声音的，没有其他打开的标签页。'}
 };
 let view = location.hash === '#inactive' ? 'inactive' : 'all';
 let state = {all: [], inactive: [], now: Date.now()};
@@ -24,10 +24,11 @@ async function refresh() {
 
 function render() {
   const duplicates = state.all.filter(t => t.duplicate === 'close');
+  const stale = state.inactive.filter(t => state.now - t.lastActive >= INACTIVE_MS);
   const windows = [...new Set(state.all.map(t => t.windowId))];
   const number = id => windows.length > 1 ? windows.indexOf(id) + 1 : 0;
   $('all-count').textContent = state.all.length;
-  $('inactive-count').textContent = state.inactive.length;
+  $('inactive-count').textContent = stale.length;
   for (const name of Object.keys(VIEWS)) $('view-' + name).setAttribute('aria-selected', String(name === view));
   const copy = VIEWS[view];
   $('heading').textContent = copy.heading;
@@ -35,10 +36,10 @@ function render() {
   $('empty-title').textContent = copy.emptyTitle;
   $('empty-text').textContent = copy.emptyText;
   const items = view === 'all' ? state.all : state.inactive;
-  const targets = view === 'all' ? duplicates : state.inactive;
+  const targets = view === 'all' ? duplicates : stale;
   $('summary').textContent = view === 'all'
     ? `${state.all.length} 个标签页${windows.length > 1 ? `，${windows.length} 个窗口` : ''} · ${duplicates.length ? `${duplicates.length} 个重复` : '没有重复'}`
-    : items.length ? `${items.length} 个标签页超过 12 小时未访问` : '全部标签页都在使用中';
+    : stale.length ? `${stale.length} 个标签页超过 12 小时未访问` : '最近 12 小时内访问过所有标签页';
   const label = view === 'all' ? '关闭重复页' : '全部关闭';
   $('primary').textContent = targets.length ? `${label} (${targets.length})` : label;
   $('primary').disabled = !targets.length;
@@ -53,15 +54,27 @@ function render() {
         section.append(title);
       }
       const ul = document.createElement('ul');
-      ul.append(...group.map(tab => row(tab, tagFor(tab), 'close-tab')));
+      ul.append(...group.map(tab => row(tab, tagFor(tab))));
       section.append(ul);
       return section;
     }));
   } else {
-    const ul = document.createElement('ul');
-    ul.append(...items.map(tab => row(tab, {text: idleLabel(state.now - tab.lastActive)}, 'close-inactive',
-      number(tab.windowId))));
-    $('list').replaceChildren(ul);
+    // Oldest first, so each bucket is a contiguous run of the sorted list.
+    $('list').replaceChildren(...IDLE_GROUPS.map(group => {
+      const tabs = items.filter(t => idleGroup(state.now - t.lastActive) === group);
+      if (!tabs.length) return '';
+      const section = document.createElement('section');
+      const head = document.createElement('div'); head.className = 'group-head';
+      const title = document.createElement('h2'); title.textContent = `${group.label} · ${tabs.length} 个`;
+      const close = document.createElement('button'); close.className = 'text-button group-close';
+      close.textContent = '关闭本组';
+      close.addEventListener('click', () => closeTabs({type: 'close-inactive', ids: tabs.map(t => t.id), minIdle: group.min}));
+      head.append(title, close);
+      const ul = document.createElement('ul');
+      ul.append(...tabs.map(tab => row(tab, {text: idleLabel(state.now - tab.lastActive)}, number(tab.windowId))));
+      section.append(head, ul);
+      return section;
+    }));
   }
 }
 
@@ -72,7 +85,7 @@ function tagFor(tab) {
   return null;
 }
 
-function row(tab, tag, closeType, windowNumber = 0) {
+function row(tab, tag, windowNumber = 0) {
   const li = document.createElement('li');
   if (tag?.kind) li.className = tag.kind;
   const open = document.createElement('button'); open.className = 'tab'; open.title = tab.title;
@@ -96,8 +109,7 @@ function row(tab, tag, closeType, windowNumber = 0) {
   });
   const close = document.createElement('button'); close.className = 'close';
   close.textContent = '×'; close.title = '关闭'; close.setAttribute('aria-label', `关闭 ${tab.title}`);
-  close.addEventListener('click', () => closeTabs(closeType === 'close-tab' ? {type: closeType, id: tab.id}
-    : {type: closeType, ids: [tab.id]}));
+  close.addEventListener('click', () => closeTabs({type: 'close-tab', id: tab.id}));
   li.append(open, close);
   return li;
 }
@@ -129,7 +141,7 @@ for (const button of document.querySelectorAll('[data-view]')) button.addEventLi
 window.addEventListener('hashchange', () => { view = location.hash === '#inactive' ? 'inactive' : 'all'; render(); });
 $('primary').addEventListener('click', () => view === 'all'
   ? closeTabs({type: 'close-duplicates', ids: state.all.filter(t => t.duplicate === 'close').map(t => t.id)})
-  : closeTabs({type: 'close-inactive', ids: state.inactive.map(t => t.id)}));
+  : closeTabs({type: 'close-inactive', ids: state.inactive.map(t => t.id), minIdle: INACTIVE_MS}));
 $('undo').addEventListener('click', async () => {
   const pending = lastClosed; lastClosed = [];
   clearTimeout(toastTimer); $('toast').hidden = true;

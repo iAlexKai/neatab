@@ -11,7 +11,7 @@ const hour=3600000, now=Date.now();
 // Window 1: the recent seven plus three idle tabs; window 2: two idle tabs and copies of open pages.
 const open=[
   ...items.map((t,i)=>({...t,windowId:1,lastActive:now-i*60000,active:i===0})),
-  ...idle.map((title,i)=>({id:20+i,windowId:i<3?1:2,title,url:'https://'+idleHosts[i]+'/archive',lastActive:now-[90,40,26,15,13][i]*hour})),
+  ...idle.map((title,i)=>({id:20+i,windowId:i<3?1:2,title,url:'https://'+idleHosts[i]+'/archive',lastActive:now-[90,52,40,26,15][i]*hour})),
   {id:30,windowId:2,title:names[2],url:'https://'+hosts[2],lastActive:now-3*hour,active:true},
   {id:31,windowId:2,title:names[0],url:'https://'+hosts[0],lastActive:now-30*hour},
   {id:32,windowId:1,title:names[0],url:'https://'+hosts[0],lastActive:now-50*hour,pinned:true},
@@ -26,17 +26,17 @@ function installPreview(items,open) {
       g.forEach((t,i)=>{t.duplicate=g.length<2?'':i===0||t.active||t.pinned?'keep':'close';});
     }
   };
-  const idle=()=>open.filter(t=>!t.active&&!t.pinned&&Date.now()-t.lastActive>=12*3600000).sort((a,b)=>a.lastActive-b.lastActive);
+  const idle=(min=12*3600000)=>open.filter(t=>!t.active&&!t.pinned&&Date.now()-t.lastActive>=min).sort((a,b)=>a.lastActive-b.lastActive);
   const close=ids=>{const closed=open.filter(t=>ids.includes(t.id));open=open.filter(t=>!ids.includes(t.id));flag();return {ok:true,closed};};
   flag();
-  const state={items,settings:{scope:'all',previews:true},native:{connected:true,trusted:true,version:'1.4.0'}};
+  const state={items,settings:{scope:'all',previews:true},native:{connected:true,trusted:true,version:'1.5.0'}};
   window.previewActions=[];
-  window.chrome.runtime={getManifest:()=>({version:'1.4.0'}),async sendMessage(message) {
+  window.chrome.runtime={getManifest:()=>({version:'1.5.0'}),async sendMessage(message) {
     window.previewActions.push(message);
     if(message.type==='state') return structuredClone({...state,inactiveCount:idle().length,duplicateCount:open.filter(t=>t.duplicate==='close').length});
-    if(message.type==='inactive') return {ok:true,now:Date.now(),items:structuredClone(idle())};
+    if(message.type==='inactive') return {ok:true,now:Date.now(),items:structuredClone(idle(0))};
     if(message.type==='all-tabs') return {ok:true,now:Date.now(),items:structuredClone(open)};
-    if(message.type==='close-inactive') return close(idle().map(t=>t.id).filter(id=>message.ids.includes(id)));
+    if(message.type==='close-inactive') return close(idle(message.minIdle).map(t=>t.id).filter(id=>message.ids.includes(id)));
     if(message.type==='close-duplicates') return close(open.filter(t=>t.duplicate==='close'&&message.ids.includes(t.id)).map(t=>t.id));
     if(message.type==='close-tab') return close([message.id]);
     if(message.type==='restore-closed'){open.push(...message.items.map((t,i)=>({...t,id:100+open.length+i,lastActive:Date.now()})));flag();return {ok:true,restored:message.items.length};}

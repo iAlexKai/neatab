@@ -1,4 +1,4 @@
-import { RecentTabs, LIMIT, safeURL, inactiveTabs, duplicateTabs, lastActive } from './core.mjs';
+import { RecentTabs, LIMIT, safeURL, inactiveTabs, duplicateTabs, lastActive, INACTIVE_MS } from './core.mjs';
 
 const HOST = 'app.seven.switcher';
 const model = new RecentTabs();
@@ -204,8 +204,8 @@ async function openTabs() {
   return tabs.filter(t => !t.incognito && !t.url?.startsWith(MANAGER_PAGE));
 }
 
-async function inactiveList() {
-  return inactiveTabs(await openTabs(), seen, Date.now());
+async function inactiveList(threshold) {
+  return inactiveTabs(await openTabs(), seen, Date.now(), threshold);
 }
 
 async function allTabs() {
@@ -227,9 +227,11 @@ function requestedIds(ids) {
   return new Set((Array.isArray(ids) ? ids : []).filter(Number.isInteger));
 }
 
-async function closeInactive(ids) {
+// minIdle is the lower bound of the closed group; a tab used since then has left the group.
+async function closeInactive(ids, minIdle) {
   const requested = requestedIds(ids);
-  return closeTargets((await inactiveList()).filter(t => requested.has(t.id)));
+  const threshold = Number.isFinite(minIdle) && minIdle >= 0 ? minIdle : INACTIVE_MS;
+  return closeTargets((await inactiveList(threshold)).filter(t => requested.has(t.id)));
 }
 
 async function closeDuplicates(ids) {
@@ -365,10 +367,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         inactiveCount: inactiveTabs(tabs, seen, Date.now()).length, duplicateCount: duplicateTabs(tabs, seen).close.size});
     }
     else if (message.type === 'inactive') respond({ok: true, now: Date.now(),
-      items: (await inactiveList()).map(t => ({id: t.id, windowId: t.windowId, title: (t.title || '新标签页').slice(0, 500),
+      items: (await inactiveList(0)).map(t => ({id: t.id, windowId: t.windowId, title: (t.title || '新标签页').slice(0, 500),
         url: (t.url || '').slice(0, 4096), lastActive: t.lastActive, discarded: !!t.discarded}))});
     else if (message.type === 'all-tabs') respond({ok: true, now: Date.now(), items: await allTabs()});
-    else if (message.type === 'close-inactive') respond(await closeInactive(message.ids));
+    else if (message.type === 'close-inactive') respond(await closeInactive(message.ids, message.minIdle));
     else if (message.type === 'close-duplicates') respond(await closeDuplicates(message.ids));
     else if (message.type === 'close-tab') respond(await closeTab(message.id));
     else if (message.type === 'restore-closed') respond(await restoreClosed(message.items));
