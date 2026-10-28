@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {RecentTabs, cycle, displayHost, supportsCopyLink, supportsCopyToast, inactiveTabs, idleLabel, INACTIVE_MS} from '../extension/core.mjs';
+import {RecentTabs, cycle, displayHost, supportsCopyLink, supportsCopyToast, inactiveTabs, idleLabel, duplicateTabs, INACTIVE_MS} from '../extension/core.mjs';
 
 const tabs = Array.from({length: 12}, (_, n) => ({id: n + 1, windowId: n < 8 ? 1 : 2,
   index: n, title: `Tab ${n + 1}`, lastAccessed: 100 - n}));
@@ -61,4 +61,13 @@ test('inactive tabs use the later of lastAccessed and the observed leave time', 
   assert.deepEqual(inactiveTabs(list, {1: 5000}, now).map(t => t.id), [2]);
   assert.equal(idleLabel(13 * 3600000), '13 小时未访问');
   assert.equal(idleLabel(50 * 3600000), '2 天未访问');
+});
+test('duplicates: on-screen copy wins, then latest activity; pinned and audible copies stay open', () => {
+  const u = 'https://a.example/x?q=1#h';
+  const list = [{id: 1, url: u, lastAccessed: 10}, {id: 2, url: u, lastAccessed: 30}, {id: 3, url: u, lastAccessed: 20, pinned: true},
+    {id: 4, url: u, lastAccessed: 5, audible: true}, {id: 5, url: 'https://b.example', active: true}, {id: 6, url: 'https://b.example', lastAccessed: 99},
+    {id: 7, url: ''}, {id: 8, url: ''}, {id: 9, url: u, incognito: true}];
+  const {keep, close} = duplicateTabs(list, {1: 40});
+  assert.deepEqual([...keep].sort(), [1, 3, 4, 5]);
+  assert.deepEqual([...close].sort(), [2, 6]);
 });

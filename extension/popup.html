@@ -7,7 +7,7 @@
   <section class="connection" aria-live="polite"><span id="dot"></span><div><strong id="status">正在连接…</strong><p id="detail">检查本机辅助程序</p></div></section>
   <div class="setup" id="setup" hidden><p id="setup-text"></p><button id="permission">开启辅助功能权限</button><button class="secondary" id="reconnect">重新连接</button></div>
   <section class="recent"><div class="section-label"><h2>最近访问</h2><span id="tab-count">0 / 7</span></div><div id="tabs"></div><p id="empty" hidden>访问几个标签页后，它们会出现在这里。</p></section>
-  <button id="inactive" class="inactive"><span><strong>不活跃标签页</strong><small>超过 12 小时未访问，可一键关闭</small></span><span id="inactive-count" class="badge">0</span></button>
+  <div class="manage"><button class="inactive" data-view="all"><span><strong>所有标签页</strong><small>关闭重复打开的页面，保留最近活跃的</small></span><span id="duplicate-count" class="badge">0</span></button><button class="inactive" data-view="inactive"><span><strong>不活跃标签页</strong><small>超过 12 小时未访问，可一键关闭</small></span><span id="inactive-count" class="badge">0</span></button></div>
   <section class="preferences"><label for="scope">切换范围<select id="scope"><option value="all">所有 Chrome 窗口</option><option value="window">当前窗口</option></select></label><label for="previews"><span>网页预览<small>停稳后缓存，最多 7 张</small></span><input type="checkbox" id="previews" role="switch"></label></section>
   <footer><button id="metrics" class="text-button">查看本机性能</button><span>仅本机 · 无数据上传</span></footer>
   <p id="error" class="error" role="alert" hidden></p>

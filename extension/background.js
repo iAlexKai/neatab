@@ -1,4 +1,4 @@
-import { RecentTabs, LIMIT, safeURL, inactiveTabs } from './core.mjs';
+import { RecentTabs, LIMIT, safeURL, inactiveTabs, duplicateTabs, lastActive } from './core.mjs';
 
 const HOST = 'app.seven.switcher';
 const model = new RecentTabs();
@@ -22,7 +22,7 @@ let publishTimer;
 // tabId -> time the user last left it. Session-scoped like tab ids; Chrome's lastAccessed covers the rest.
 let seen = {};
 const activeByWindow = new Map();
-const INACTIVE_PAGE = chrome.runtime.getURL('inactive.html');
+const MANAGER_PAGE = chrome.runtime.getURL('tabs.html');
 
 const ready = initialize();
 
@@ -199,18 +199,48 @@ async function compactPreview(data) {
   } finally { bitmap.close(); }
 }
 
-async function inactiveList() {
+async function openTabs() {
   const tabs = await chrome.tabs.query({windowType: 'normal'});
-  return inactiveTabs(tabs.filter(t => !t.url?.startsWith(INACTIVE_PAGE)), seen, Date.now());
+  return tabs.filter(t => !t.incognito && !t.url?.startsWith(MANAGER_PAGE));
 }
 
-async function closeInactive(ids) {
-  const requested = new Set((Array.isArray(ids) ? ids : []).filter(Number.isInteger));
-  // Re-check at close time: a tab used since the page rendered is no longer a target.
-  const targets = (await inactiveList()).filter(t => requested.has(t.id));
+async function inactiveList() {
+  return inactiveTabs(await openTabs(), seen, Date.now());
+}
+
+async function allTabs() {
+  const tabs = await openTabs();
+  const {keep, close} = duplicateTabs(tabs, seen);
+  return tabs.map(t => ({id: t.id, windowId: t.windowId, index: t.index, title: (t.title || '新标签页').slice(0, 500),
+    url: (t.url || '').slice(0, 4096), active: !!t.active, pinned: !!t.pinned, lastActive: lastActive(t, seen),
+    duplicate: close.has(t.id) ? 'close' : keep.has(t.id) ? 'keep' : ''}));
+}
+
+async function closeTargets(targets) {
   if (targets.length) await chrome.tabs.remove(targets.map(t => t.id));
   return {ok: true, closed: targets.map(t => ({url: t.url || '', title: t.title || '',
     windowId: t.windowId, index: t.index}))};
+}
+
+// Re-check at close time: a tab used or changed since the page rendered is no longer a target.
+function requestedIds(ids) {
+  return new Set((Array.isArray(ids) ? ids : []).filter(Number.isInteger));
+}
+
+async function closeInactive(ids) {
+  const requested = requestedIds(ids);
+  return closeTargets((await inactiveList()).filter(t => requested.has(t.id)));
+}
+
+async function closeDuplicates(ids) {
+  const requested = requestedIds(ids);
+  const tabs = await openTabs();
+  const {close} = duplicateTabs(tabs, seen);
+  return closeTargets(tabs.filter(t => close.has(t.id) && requested.has(t.id)));
+}
+
+async function closeTab(id) {
+  return closeTargets((await openTabs()).filter(t => t.id === id));
 }
 
 async function restoreClosed(items) {
@@ -329,12 +359,18 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Only packaged UI (popup or the inactive-tabs page) can invoke controls. No content scripts exist.
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) return;
   void ready.then(async () => {
-    if (message.type === 'state') respond({items: snapshot().items, settings, native: nativeState,
-      inactiveCount: (await inactiveList()).length});
+    if (message.type === 'state') {
+      const tabs = await openTabs();
+      respond({items: snapshot().items, settings, native: nativeState,
+        inactiveCount: inactiveTabs(tabs, seen, Date.now()).length, duplicateCount: duplicateTabs(tabs, seen).close.size});
+    }
     else if (message.type === 'inactive') respond({ok: true, now: Date.now(),
       items: (await inactiveList()).map(t => ({id: t.id, windowId: t.windowId, title: (t.title || '新标签页').slice(0, 500),
         url: (t.url || '').slice(0, 4096), lastActive: t.lastActive, discarded: !!t.discarded}))});
+    else if (message.type === 'all-tabs') respond({ok: true, now: Date.now(), items: await allTabs()});
     else if (message.type === 'close-inactive') respond(await closeInactive(message.ids));
+    else if (message.type === 'close-duplicates') respond(await closeDuplicates(message.ids));
+    else if (message.type === 'close-tab') respond(await closeTab(message.id));
     else if (message.type === 'restore-closed') respond(await restoreClosed(message.items));
     else if (message.type === 'activate') respond(await activate(message.tabId));
     else if (message.type === 'settings') {

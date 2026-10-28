@@ -6,7 +6,7 @@ const extensionVersion = chrome.runtime.getManifest().version;
 
 async function refresh() {
   try {
-    const {items, settings, native, inactiveCount} = await send({type: 'state'});
+    const {items, settings, native, inactiveCount, duplicateCount} = await send({type: 'state'});
     if (!items) throw new Error('后台服务暂不可用，请重新打开扩展');
     const outdated = native.connected && !supportsCopyToast(native.version);
     const usable = native.connected && native.trusted && !outdated;
@@ -21,6 +21,8 @@ async function refresh() {
     if (initial) { $('scope').value = settings.scope; $('previews').checked = settings.previews; initial = false; }
     $('inactive-count').textContent = String(inactiveCount ?? 0);
     $('inactive-count').classList.toggle('zero', !inactiveCount);
+    $('duplicate-count').textContent = duplicateCount ? `${duplicateCount} 个重复` : '无重复';
+    $('duplicate-count').classList.toggle('zero', !duplicateCount);
     $('tab-count').textContent = `${items.length} / 7`;
     $('empty').hidden = !!items.length;
     const rows = items.map((tab, i) => {
@@ -51,11 +53,13 @@ $('scope').addEventListener('change', save);
 $('previews').addEventListener('change', save);
 $('permission').addEventListener('click', () => send({type: 'permission'}));
 $('reconnect').addEventListener('click', async () => { await send({type: 'reconnect'}); await refresh(); });
-$('inactive').addEventListener('click', async () => {
-  const url = chrome.runtime.getURL('inactive.html');
-  const [existing] = await chrome.tabs.query({url});
+for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', async () => {
+  const page = chrome.runtime.getURL('tabs.html');
+  const url = `${page}#${button.dataset.view}`;
+  // Match patterns cannot target chrome-extension:// pages, so filter instead of tabs.query({url}).
+  const existing = (await chrome.tabs.query({})).find(t => t.url?.startsWith(page));
   if (existing) {
-    await chrome.tabs.update(existing.id, {active: true});
+    await chrome.tabs.update(existing.id, {active: true, url});
     await chrome.windows.update(existing.windowId, {focused: true});
   } else await chrome.tabs.create({url});
   window.close();

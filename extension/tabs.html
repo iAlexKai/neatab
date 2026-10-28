@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>整理标签页 · Seven</title><link rel="stylesheet" href="tabs.css"></head>
+<body>
+  <main>
+    <nav class="views" role="tablist">
+      <button role="tab" id="view-all" data-view="all">所有标签页 <span id="all-count"></span></button>
+      <button role="tab" id="view-inactive" data-view="inactive">不活跃 <span id="inactive-count"></span></button>
+    </nav>
+    <header><img src="icon128.png" width="40" height="40" alt=""><div><h1 id="heading">所有标签页</h1><p id="summary">正在检查…</p></div>
+      <button id="primary" disabled>关闭重复页</button></header>
+    <p class="note" id="note"></p>
+    <div id="list"></div>
+    <section id="empty" class="empty" hidden><strong id="empty-title"></strong><p id="empty-text"></p></section>
+    <p id="error" class="error" role="alert" hidden></p>
+  </main>
+  <div id="toast" class="toast" role="status" hidden><span id="toast-text"></span><button id="undo" class="text-button">撤销</button></div>
+  <script src="tabs.js" type="module"></script>
+</body></html>

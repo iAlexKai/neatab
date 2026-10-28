@@ -85,3 +85,23 @@ export function idleLabel(ms) {
   const days = Math.floor(hours / 24);
   return days < 30 ? `${days} 天未访问` : '超过 30 天未访问';
 }
+
+// Tabs with the identical full URL (query and # included). Per URL the most recently used tab is
+// kept: one on screen first, then the latest activity. Pinned, audible or on-screen copies stay open.
+export function duplicateTabs(tabs, seen = {}) {
+  const groups = new Map();
+  for (const tab of tabs) {
+    if (tab.id < 0 || tab.incognito || !tab.url) continue;
+    const group = groups.get(tab.url);
+    if (group) group.push(tab); else groups.set(tab.url, [tab]);
+  }
+  const keep = new Set(), close = new Set();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const [first, ...rest] = group.map(t => ({...t, lastActive: lastActive(t, seen)})).sort((a, b) =>
+      (!!b.active - !!a.active) || (b.lastActive - a.lastActive) || (a.windowId - b.windowId) || (a.index - b.index));
+    keep.add(first.id);
+    for (const t of rest) (t.active || t.pinned || t.audible ? keep : close).add(t.id);
+  }
+  return {keep, close};
+}

@@ -21,7 +21,15 @@ li{display:flex;align-items:center;gap:6px;border-bottom:1px solid light-dark(#f
 .title,.host{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
 .title{font-size:12px}
 .host{font-size:10px;color:light-dark(#9a94a3,#a197ac);margin-top:3px}
-.idle{font-size:10px;color:light-dark(#a69eb1,#9285a0);white-space:nowrap;flex-shrink:0}
+.tag{font-size:10px;color:light-dark(#a69eb1,#9285a0);white-space:nowrap;flex-shrink:0}
+li.duplicate .tag{color:light-dark(#b0632f,#e7a171)}
+li.duplicate .title{color:light-dark(#77737f,#b4aebd)}
+li.keep .tag{color:light-dark(#4f8c66,#86c49c)}
+.views{display:flex;gap:4px;margin:0 0 22px;padding:3px;border-radius:9px;background:light-dark(#f0eef4,#2c2933);width:max-content;max-width:100%}
+.views button{background:transparent;color:light-dark(#77737f,#b4aebd);padding:6px 12px;font-weight:500;font-size:12px}
+.views button[aria-selected=true]{background:light-dark(#fff,#3b3448);color:inherit;box-shadow:0 1px 2px rgb(0 0 0 / .08)}
+.views span{font-size:10px;opacity:.7;margin-left:2px}
+h2{font-size:10px;font-weight:600;letter-spacing:.5px;color:light-dark(#8c8696,#a49aaf);margin:18px 0 6px}
 .close{width:28px;height:28px;padding:0;display:grid;place-items:center;background:transparent;color:light-dark(#a69eb1,#9285a0);font-size:16px;line-height:1;margin-right:4px}
 .close:hover{background:light-dark(#f1edf7,#302a3a);color:light-dark(#6f5b9b,#d0bdec)}
 .empty{text-align:center;padding:56px 0}
@@ -30,4 +38,4 @@ li{display:flex;align-items:center;gap:6px;border-bottom:1px solid light-dark(#f
 .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);display:flex;align-items:center;gap:14px;max-width:calc(100% - 32px);background:light-dark(#2b2833,#f0edf7);color:light-dark(#f4f1f8,#24232b);border-radius:10px;padding:10px 16px;font-size:12px;box-shadow:0 6px 24px rgb(0 0 0 / .18)}
 .text-button{padding:0;background:none;color:light-dark(#c9b5f2,#7b5fc1);font-weight:600}
 [hidden]{display:none!important}
-@media (max-width:520px){.idle{display:none}h1{font-size:19px}}
+@media (max-width:520px){.tag{display:none}li.duplicate .host::after{content:' · 重复'}h1{font-size:19px}}

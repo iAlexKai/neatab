@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
-import {RecentTabs, LIMIT, safeURL, inactiveTabs, INACTIVE_MS} from '../extension/core.mjs';
+import {RecentTabs, LIMIT, safeURL, inactiveTabs, duplicateTabs, lastActive, INACTIVE_MS} from '../extension/core.mjs';
 
 class Event {
   handlers = [];
@@ -46,7 +46,7 @@ async function harness() {
       return {size:3,arrayBuffer:async()=>Uint8Array.from([255,216,255]).buffer};
     }
   }
-  const context = vm.createContext({chrome,RecentTabs,LIMIT,safeURL,inactiveTabs,console,performance,URL,Date:Clock,Map,Set,Uint8Array,TextEncoder,structuredClone,btoa,
+  const context = vm.createContext({chrome,RecentTabs,LIMIT,safeURL,inactiveTabs,duplicateTabs,lastActive,console,performance,URL,Date:Clock,Map,Set,Uint8Array,TextEncoder,structuredClone,btoa,
     fetch:async()=>({blob:async()=>({})}),OffscreenCanvas:Canvas,
     createImageBitmap:async()=>({width:1920,height:1080,close(){bitmapClosed++;}}),
     setTimeout:(fn,delay)=>{timers.set(++timerId,{fn,delay});return timerId;},clearTimeout:id=>timers.delete(id)});
@@ -259,4 +259,43 @@ test('a web page cannot close tabs through the inactive-tab controls',async()=>{
   const h=await harness();h.data.forEach(t=>{t.lastAccessed=10000;});h.advance(INACTIVE_MS);
   assert.equal(await h.request({type:'close-inactive',ids:[2]},{id:'test',url:'https://evil.example',tab:{id:1}}),undefined);
   assert.deepEqual(h.operations,[]);
+});
+test('close duplicates keeps the most recently used copy of each URL across windows',async()=>{
+  const h=await harness();
+  // Same URL as tab 1 (on screen in window 1) and tab 9 (on screen in window 2).
+  h.data[3].url=h.data[5].url=h.data[0].url;          // tabs 4, 6 duplicate 1
+  h.data[6].url=h.data[7].url=h.data[9].url='https://example.com/dup'; // 7, 8, 10
+  h.data[6].lastAccessed=50;h.data[7].lastAccessed=90;h.data[9].lastAccessed=70;
+  h.data[2].url=h.data[0].url+'#section';              // different anchor: not a duplicate
+  h.data[5].pinned=true;
+  const {items}=await h.request({type:'all-tabs'});
+  const mark=Object.fromEntries(items.map(t=>[t.id,t.duplicate]));
+  assert.deepEqual([mark[1],mark[4],mark[6],mark[3]],['keep','close','keep','']);
+  assert.deepEqual([mark[8],mark[7],mark[10]],['keep','close','close']);
+  assert.equal((await h.request({type:'state'})).duplicateCount,3);
+  const ids=items.filter(t=>t.duplicate==='close').map(t=>t.id);
+  h.data[9].url='https://example.com/navigated';       // tab 10 navigated after render: keep it
+  const result=await h.request({type:'close-duplicates',ids:[...ids,1,8]});
+  assert.deepEqual(h.operations,[['remove',4,7]]);
+  assert.deepEqual(result.closed.map(t=>t.url),[h.data[0].url,'https://example.com/dup']);
+});
+test('leaving a tab makes it the most recent copy to keep',async()=>{
+  const h=await harness();
+  h.data[1].url=h.data[2].url='https://example.com/same';
+  h.data[1].lastAccessed=10;h.data[2].lastAccessed=20;
+  h.data[0].active=false;h.data[1].active=true;
+  h.chrome.tabs.onActivated.fire({tabId:2,windowId:1});await flush();
+  h.data[1].active=false;h.data[0].active=true;
+  h.chrome.tabs.onActivated.fire({tabId:1,windowId:1});await flush();
+  const mark=Object.fromEntries((await h.request({type:'all-tabs'})).items.map(t=>[t.id,t.duplicate]));
+  assert.deepEqual([mark[2],mark[3]],['keep','close']);
+});
+test('single close only closes an open normal tab, and the manager page is not listed',async()=>{
+  const h=await harness();
+  h.data.push({id:50,windowId:1,index:20,lastAccessed:1,title:'整理标签页',url:'chrome-extension://test/tabs.html#all',active:false,incognito:false});
+  const {items}=await h.request({type:'all-tabs'});
+  assert.ok(!items.some(t=>t.id===50));
+  assert.deepEqual((await h.request({type:'close-tab',id:999})).closed,[]);
+  await h.request({type:'close-tab',id:5});
+  assert.deepEqual(h.operations,[['remove',5]]);
 });
