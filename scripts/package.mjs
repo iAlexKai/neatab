@@ -1,0 +1,17 @@
+import {cpSync,mkdirSync,readFileSync,writeFileSync,chmodSync,rmSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
+import {execFileSync} from 'node:child_process';
+const root=fileURLToPath(new URL('../',import.meta.url));
+const dest=root+'dist/Seven';
+mkdirSync(root+'dist',{recursive:true});
+rmSync(dest,{recursive:true,force:true});mkdirSync(dest);
+cpSync(root+'extension',dest+'/seven-extension',{recursive:true});
+cpSync(root+'build/Seven.app',dest+'/Seven.app',{recursive:true});
+cpSync(root+'scripts/install.command',dest+'/安装 Seven.command');
+cpSync(root+'scripts/uninstall.command',dest+'/卸载 Seven.command');
+cpSync(root+'README.md',dest+'/使用说明.md');
+cpSync(root+'VALIDATION.md',dest+'/验收清单.md');
+cpSync(root+'extension-id.txt',dest+'/extension-id.txt');
+chmodSync(dest+'/安装 Seven.command',0o755);chmodSync(dest+'/卸载 Seven.command',0o755);
+execFileSync('/usr/bin/ditto',['-c','-k','--sequesterRsrc','--keepParent',dest,root+'dist/Seven-macOS-'+process.arch+'.zip']);
+console.log('Packaged '+dest);
