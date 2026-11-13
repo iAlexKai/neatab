@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>Neatab store assets</title>
+<style>
+:root{--ink:#24232b;--muted:#6f6a7a;--accent:#7b5fc1;--bg1:#f6f2fd;--bg2:#ebe4fa}
+*{box-sizing:border-box}
+html,body{margin:0;width:1280px;height:800px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;color:var(--ink)}
+body{background:linear-gradient(135deg,var(--bg1),var(--bg2));display:flex;align-items:center;gap:56px;padding:0 64px}
+.copy{width:400px;flex-shrink:0}
+.brand{display:flex;align-items:center;gap:12px;font-weight:650;font-size:20px;letter-spacing:-.3px;margin-bottom:40px}
+.brand img{width:44px;height:44px}
+h1{font-size:44px;line-height:1.22;letter-spacing:-1.2px;margin:0 0 20px;font-weight:700}
+p{font-size:19px;line-height:1.7;color:var(--muted);margin:0}
+kbd{font-family:inherit;font-size:.9em;border:1px solid #d9d3e6;border-bottom-width:3px;border-radius:7px;background:#fff;padding:1px 8px}
+.stage{flex:1;display:flex;justify-content:center;align-items:center;height:100%}
+.window{width:720px;height:600px;border-radius:14px;background:#fbfafc;box-shadow:0 30px 70px rgb(64 40 120 / .22);overflow:hidden;display:flex;flex-direction:column}
+.bar{height:38px;background:#efedf3;display:flex;align-items:center;gap:7px;padding:0 14px;flex-shrink:0}
+.bar i{width:11px;height:11px;border-radius:50%;background:#dcd8e3}
+.bar span{margin-left:14px;font-size:12px;color:#8d8798;background:#fff;border-radius:6px;padding:4px 12px}
+.window img{width:720px;height:564px;display:block}
+.switcher{position:relative;width:100%;border-radius:18px;box-shadow:0 30px 70px rgb(64 40 120 / .25);display:block}
+.backdrop{position:relative;width:700px}
+.backdrop .ghost{position:absolute;inset:-70px -24px;border-radius:16px;background:#fbfafc;opacity:.6;box-shadow:0 20px 60px rgb(64 40 120 / .12)}
+.popup{width:302px;height:660px;border-radius:14px;box-shadow:0 30px 70px rgb(64 40 120 / .22);overflow:hidden;background:#fbfafc}
+.popup img{width:302px;height:660px;display:block}
+body.tile{width:440px;height:280px;padding:0 36px;gap:0;justify-content:flex-start}
+.tile .brand{margin:0 0 14px;font-size:34px;gap:14px}
+.tile .brand img{width:64px;height:64px}
+.tile p{font-size:17px;line-height:1.55;color:var(--ink)}
+.tile small{display:block;font-size:13px;color:var(--muted);margin-top:8px}
+</style></head>
+<body>
+<script>
+const RAW = '../dist/store-assets/raw-';
+const shots = {
+  switcher: {title: '<kbd>⌥</kbd> + <kbd>Tab</kbd><br>回到刚才的上下文', text: '按住 Option 连按 Tab 选择，松开即切换。最近 7 个标签页按使用顺序排列，跨窗口也能切。',
+    stage: `<div class="backdrop"><div class="ghost"></div><img class="switcher" src="../build/neatab-switcher-light.png" alt=""></div>`},
+  duplicates: {title: '一键关闭<br>重复打开的页面', text: '同一个地址开了好几次？每个地址只保留最近活跃的那个，固定和正在显示的标签页不受影响。',
+    stage: frame('all', 'Neatab · 所有标签页')},
+  inactive: {title: '按闲置时长<br>清理标签页', text: '48 小时以上、24–48 小时、12–24 小时分组。可以全部关闭，也可以按组关闭，8 秒内可撤销。',
+    stage: frame('inactive', 'Neatab · 不活跃标签页')},
+  popup: {title: '所有功能<br>都在一个弹窗里', text: '最近访问、标签整理、<kbd>⌘</kbd><kbd>⇧</kbd><kbd>C</kbd> 复制链接。全部在本机运行，不上传任何数据。',
+    stage: `<div class="popup"><img src="${RAW}popup.png" alt=""></div>`}
+};
+function frame(name, label) {
+  return `<div class="window"><div class="bar"><i></i><i></i><i></i><span>${label}</span></div><img src="${RAW}${name}.png" alt=""></div>`;
+}
+const name = new URLSearchParams(location.search).get('shot') || 'switcher';
+const brand = `<div class="brand"><img src="../extension/icon128.png" alt="">Neatab</div>`;
+if (name === 'tile') {
+  document.body.className = 'tile';
+  document.body.innerHTML = `<div>${brand}<p>把 Arc 最核心的标签体验<br>带进 Chrome</p><small>⌥ Tab 切换 · 关闭重复页 · 清理闲置标签</small></div>`;
+} else {
+  const shot = shots[name];
+  document.body.innerHTML = `<div class="copy">${brand}<h1>${shot.title}</h1><p>${shot.text}</p></div><div class="stage">${shot.stage}</div>`;
+}
+</script>
+</body></html>

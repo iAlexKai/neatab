@@ -71,11 +71,36 @@ export function lastActive(tab, seen = {}) {
   return Math.max(tab.lastAccessed || 0, seen[tab.id] || 0);
 }
 
+// Time the user was away: screen locked, no input for a while, asleep, or Chrome not running.
+// Intervals are [start, end] in ms, kept sorted and merged; ones older than AWAY_KEEP_MS are dropped.
+export const AWAY_IDLE_SECONDS = 600;
+export const AWAY_KEEP_MS = 60 * 24 * 3600000;
+
+export function addAway(intervals, start, end, now = end) {
+  if (!(end > start)) return intervals;
+  const merged = [];
+  for (const [s, e] of [...intervals, [start, end]].sort((a, b) => a[0] - b[0])) {
+    const last = merged.at(-1);
+    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+    else merged.push([s, e]);
+  }
+  return merged.filter(([, e]) => now - e < AWAY_KEEP_MS);
+}
+
+export function awayTime(intervals, from, to) {
+  let total = 0;
+  for (const [s, e] of intervals) total += Math.max(0, Math.min(e, to) - Math.max(s, from));
+  return total;
+}
+
 // Active, pinned and audible tabs are in use. Unknown activity time is never treated as stale.
-export function inactiveTabs(tabs, seen, now, threshold = INACTIVE_MS) {
+// `idle` counts only time the user was at the computer: a weekend away does not age every tab.
+export function inactiveTabs(tabs, seen, now, threshold = INACTIVE_MS, away = []) {
   return tabs.filter(t => t.id >= 0 && !t.incognito && !t.active && !t.pinned && !t.audible)
     .map(t => ({...t, lastActive: lastActive(t, seen)}))
-    .filter(t => t.lastActive > 0 && now - t.lastActive >= threshold)
+    .filter(t => t.lastActive > 0)
+    .map(t => ({...t, idle: now - t.lastActive - awayTime(away, t.lastActive, now)}))
+    .filter(t => t.idle >= threshold)
     .sort((a, b) => a.lastActive - b.lastActive || a.windowId - b.windowId || a.index - b.index);
 }
 
@@ -117,4 +142,46 @@ export function duplicateTabs(tabs, seen = {}) {
     for (const t of rest) (t.active || t.pinned || t.audible ? keep : close).add(t.id);
   }
   return {keep, close};
+}
+
+// One window's tabs in tab-strip order, split into runs of the same Chrome tab group.
+// Ungrouped tabs form runs with a null group.
+export function tabSections(tabs, groups = []) {
+  const known = new Map(groups.map(group => [group.id, group]));
+  const sections = [];
+  for (const tab of [...tabs].sort((a, b) => a.index - b.index)) {
+    const id = tab.groupId >= 0 ? tab.groupId : -1;
+    const last = sections.at(-1);
+    if (last?.id === id) last.tabs.push(tab);
+    else sections.push({id, group: id < 0 ? null : known.get(id) || {id}, tabs: [tab]});
+  }
+  return sections;
+}
+
+// Memory release: tabs unused this long are discarded. The user picks one of these, in minutes.
+export const DISCARD_CHOICES = [30, 60, 120, 360];
+export const DISCARD_MINUTES = 60;
+export const DISCARD_MS = DISCARD_MINUTES * 60000;
+// Under macOS memory pressure, tabs unused this long go too, oldest first.
+export const PRESSURE_IDLE_MS = {warning: 15 * 60000, critical: 5 * 60000};
+
+// Tabs whose memory can be released: idle long enough, not on screen, not playing sound, still loaded.
+// Pinned tabs count too. `fresh` holds tabs restored at browser start and not opened since:
+// the user has not touched them, so they go regardless of idle time.
+export function discardCandidates(tabs, seen, now, threshold = DISCARD_MS, fresh = new Set()) {
+  return tabs.filter(t => t.id >= 0 && !t.incognito && !t.active && !t.audible && !t.discarded && t.status !== 'unloaded')
+    .map(t => ({...t, lastActive: lastActive(t, seen)}))
+    .filter(t => fresh.has(t.id) || (t.lastActive > 0 && now - t.lastActive >= threshold))
+    .sort((a, b) => a.lastActive - b.lastActive);
+}
+
+// Runs in the page (main world, every frame): would closing it now show Chrome's "Leave site?"
+// dialog? Dispatches a synthetic beforeunload so the page's own handlers decide, exactly as on a
+// real close, without closing anything. Chrome only shows that dialog after the user interacted.
+export function wouldPromptOnLeave() {
+  if (!navigator.userActivation?.hasBeenActive) return false;
+  const event = document.createEvent('BeforeUnloadEvent');
+  event.initEvent('beforeunload', false, true);
+  window.dispatchEvent(event);
+  return event.defaultPrevented || !!event.returnValue;
 }

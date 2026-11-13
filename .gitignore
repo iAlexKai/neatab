@@ -2,3 +2,5 @@ build/
 dist/
 .DS_Store
 *.log
+.claude/decisions.md
+.claude/settings.local.json

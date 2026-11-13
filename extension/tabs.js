@@ -1,14 +1,14 @@
-import {displayHost, idleLabel, idleGroup, IDLE_GROUPS, INACTIVE_MS} from './core.mjs';
+import {displayHost, idleLabel, idleGroup, IDLE_GROUPS, INACTIVE_MS, tabSections} from './core.mjs';
 const $ = id => document.getElementById(id);
 const send = message => chrome.runtime.sendMessage(message);
 const VIEWS = {
-  all: {heading: '所有标签页', note: '按窗口和标签栏顺序列出当前打开的标签页。地址完全相同的视为重复，只保留最近活跃的一个；正在显示、已固定或正在播放声音的不会被关闭。',
+  all: {heading: '所有标签页', note: '按窗口、分组和标签栏顺序列出当前打开的标签页。地址完全相同的视为重复，只保留最近活跃的一个；正在显示、已固定或正在播放声音的不会被关闭。',
     emptyTitle: '没有打开的标签页', emptyText: ''},
-  inactive: {heading: '不活跃标签页', note: '按多久没有切换到分组，可以按组关闭。「全部关闭」只关闭超过 12 小时未访问的标签页。正在显示、已固定或正在播放声音的标签页不会列出。',
+  inactive: {heading: '不活跃标签页', note: '按多久没有切换到分组，可以按组关闭。时长只算你在用电脑的时间，锁屏、休眠、离开超过 10 分钟和 Chrome 退出期间不计入。「全部关闭」只关闭超过 12 小时未访问的标签页。正在显示、已固定或正在播放声音的标签页不会列出。',
     emptyTitle: '没有可整理的标签页', emptyText: '除了正在显示、已固定或正在播放声音的，没有其他打开的标签页。'}
 };
 let view = location.hash === '#inactive' ? 'inactive' : 'all';
-let state = {all: [], inactive: [], now: Date.now()};
+let state = {all: [], groups: [], inactive: [], now: Date.now()};
 let lastClosed = [];
 let toastTimer;
 
@@ -16,7 +16,7 @@ async function refresh() {
   try {
     const [all, inactive] = await Promise.all([send({type: 'all-tabs'}), send({type: 'inactive'})]);
     if (!all?.ok || !inactive?.ok) throw new Error('后台服务暂不可用，请刷新页面');
-    state = {all: all.items, inactive: inactive.items, now: all.now};
+    state = {all: all.items, groups: all.groups || [], inactive: inactive.items, now: all.now};
     render();
     $('error').hidden = true;
   } catch (error) { showError(String(error)); }
@@ -24,7 +24,7 @@ async function refresh() {
 
 function render() {
   const duplicates = state.all.filter(t => t.duplicate === 'close');
-  const stale = state.inactive.filter(t => state.now - t.lastActive >= INACTIVE_MS);
+  const stale = state.inactive.filter(t => t.idle >= INACTIVE_MS);
   const windows = [...new Set(state.all.map(t => t.windowId))];
   const number = id => windows.length > 1 ? windows.indexOf(id) + 1 : 0;
   $('all-count').textContent = state.all.length;
@@ -46,22 +46,20 @@ function render() {
   $('empty').hidden = !!items.length;
   if (view === 'all') {
     $('list').replaceChildren(...windows.map(id => {
-      const group = state.all.filter(t => t.windowId === id).sort((a, b) => a.index - b.index);
+      const tabs = state.all.filter(t => t.windowId === id);
       const section = document.createElement('section');
       if (windows.length > 1) {
         const title = document.createElement('h2');
-        title.textContent = `窗口 ${number(id)} · ${group.length} 个`;
+        title.textContent = `窗口 ${number(id)} · ${tabs.length} 个`;
         section.append(title);
       }
-      const ul = document.createElement('ul');
-      ul.append(...group.map(tab => row(tab, tagFor(tab))));
-      section.append(ul);
+      section.append(...tabSections(tabs, state.groups).map(tabRun));
       return section;
     }));
   } else {
     // Oldest first, so each bucket is a contiguous run of the sorted list.
     $('list').replaceChildren(...IDLE_GROUPS.map(group => {
-      const tabs = items.filter(t => idleGroup(state.now - t.lastActive) === group);
+      const tabs = items.filter(t => idleGroup(t.idle) === group);
       if (!tabs.length) return '';
       const section = document.createElement('section');
       const head = document.createElement('div'); head.className = 'group-head';
@@ -71,17 +69,33 @@ function render() {
       close.addEventListener('click', () => closeTabs({type: 'close-inactive', ids: tabs.map(t => t.id), minIdle: group.min}));
       head.append(title, close);
       const ul = document.createElement('ul');
-      ul.append(...tabs.map(tab => row(tab, {text: idleLabel(state.now - tab.lastActive)}, number(tab.windowId))));
+      ul.append(...tabs.map(tab => row(tab, {text: idleLabel(tab.idle)}, number(tab.windowId))));
       section.append(head, ul);
       return section;
     }));
   }
 }
 
+function tabRun({group, tabs}) {
+  const ul = document.createElement('ul');
+  ul.append(...tabs.map(tab => row(tab, tagFor(tab))));
+  if (!group) { ul.className = 'ungrouped'; return ul; }
+  const block = document.createElement('div'); block.className = 'tab-group';
+  block.dataset.color = group.color || 'grey';
+  const head = document.createElement('div'); head.className = 'tab-group-head';
+  const name = document.createElement('span'); name.className = 'tab-group-name';
+  name.textContent = group.title || '未命名分组';
+  const count = document.createElement('span'); count.textContent = `${tabs.length} 个`;
+  head.append(name, count);
+  block.append(head, ul);
+  return block;
+}
+
 function tagFor(tab) {
   if (tab.duplicate === 'close') return {text: '重复 · 将关闭', kind: 'duplicate'};
   if (tab.duplicate === 'keep') return {text: '重复 · 保留', kind: 'keep'};
   if (tab.active) return {text: '当前', kind: ''};
+  if (tab.discarded) return {text: '已释放内存', kind: ''};
   return null;
 }
 

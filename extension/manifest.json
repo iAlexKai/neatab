@@ -1,14 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "Seven · 最近标签切换",
-  "version": "1.5.0",
-  "description": "Option+Tab 切换最近 7 个标签页，Command+Shift+C 复制当前网页链接，一键关闭 12 小时未访问的标签页和重复页。适用于 macOS Chrome，搭配 Seven 辅助程序。",
+  "name": "Neatab · 最近标签切换与整理",
+  "version": "2.7.0",
+  "description": "在 Chrome 中获得 Arc 最核心的标签体验：Option+Tab 切换最近标签页，一键关闭重复页和不活跃标签页。",
   "minimum_chrome_version": "121",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwKCGIZeNOJRHHJz2RKe64JLS4D75wOlj8XB1ND0ctmzeMukeUIYiuX8LoB10RSKgFsrHDtTW41imjsu5ykJ5A9WEeBi8S5/Oh/s5mHAGKKjnM4uZ8MAB6wbBxao1hbg+cTirzjCZjoPRfFLkritJATg7cw0kiYcf6tcN1VYoSqswm3U/n4UJAKIXWlxVMYntSt+1wbveQC4XkUlwD61N2GdpuVLkauC5wFOSq5+j6PsjeAH54G+J9FCuwbjOu3h9NCzOsR/FRe2Q7EYVDeocxI5KPrlF42gIwns6fBc0XU+FJapWcnWKtCSQel7jrLJiN8EntuPMGBkUZ5mVCSLmAQIDAQAB",
   "permissions": [
     "tabs",
+    "tabGroups",
+    "idle",
     "storage",
-    "nativeMessaging"
+    "nativeMessaging",
+    "alarms",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -19,9 +23,16 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Seven · 最近 7 个标签页"
+    "default_title": "Neatab",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   },
   "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
     "128": "icon128.png"
   },
   "incognito": "not_allowed"

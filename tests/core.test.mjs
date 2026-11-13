@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {RecentTabs, cycle, displayHost, supportsCopyLink, supportsCopyToast, inactiveTabs, idleLabel, idleGroup, duplicateTabs, INACTIVE_MS} from '../extension/core.mjs';
+import {RecentTabs, cycle, displayHost, supportsCopyLink, supportsCopyToast, inactiveTabs, idleLabel, idleGroup, duplicateTabs, discardCandidates, wouldPromptOnLeave, tabSections, addAway, awayTime, AWAY_KEEP_MS, INACTIVE_MS, DISCARD_MS} from '../extension/core.mjs';
 
 const tabs = Array.from({length: 12}, (_, n) => ({id: n + 1, windowId: n < 8 ? 1 : 2,
   index: n, title: `Tab ${n + 1}`, lastAccessed: 100 - n}));
@@ -77,4 +77,57 @@ test('idle groups: boundaries belong to the older group', () => {
     ['under12', 'under12', 'h12to24', 'h12to24', 'h24to48', 'h24to48', 'over48', 'over48']);
   assert.equal(idleLabel(30000), '刚刚访问');
   assert.equal(idleLabel(25 * 60000), '25 分钟未访问');
+});
+test('discard candidates: 6 hours idle, loaded, not on screen or audible; pinned included', () => {
+  const now = DISCARD_MS + 1000;
+  const list = [{id: 1, lastAccessed: 500}, {id: 2, lastAccessed: 100, pinned: true}, {id: 3, lastAccessed: 100, active: true},
+    {id: 4, lastAccessed: 100, audible: true}, {id: 5, lastAccessed: 100, discarded: true}, {id: 6, lastAccessed: 100, status: 'unloaded'},
+    {id: 7, lastAccessed: 5000}, {id: 8, lastAccessed: 0}];
+  assert.deepEqual(discardCandidates(list, {}, now).map(t => t.id), [2, 1]);
+  assert.deepEqual(discardCandidates(list, {1: 3000}, now).map(t => t.id), [2]);
+});
+test('leave check asks the page whether closing would show the leave dialog', () => {
+  const run = (handlers, active = true) => {
+    globalThis.navigator ??= {};
+    const saved = globalThis.navigator.userActivation;
+    Object.defineProperty(globalThis.navigator, 'userActivation', {value: {hasBeenActive: active}, configurable: true});
+    globalThis.document = {createEvent: () => ({defaultPrevented: false, returnValue: '',
+      initEvent(type, bubbles, cancelable) { this.type = type; this.cancelable = cancelable; },
+      preventDefault() { this.defaultPrevented = true; }})};
+    globalThis.window = {dispatchEvent: event => handlers.forEach(h => h(event))};
+    try { return wouldPromptOnLeave(); }
+    finally { delete globalThis.document; delete globalThis.window;
+      Object.defineProperty(globalThis.navigator, 'userActivation', {value: saved, configurable: true}); }
+  };
+  assert.equal(run([]), false);
+  assert.equal(run([event => { event.preventDefault(); }]), true);
+  assert.equal(run([event => { event.returnValue = '有未保存的修改'; }]), true);
+  assert.equal(run([event => { if (event.type !== 'beforeunload') event.preventDefault(); }]), false);
+  // Chrome never shows the dialog on a page the user has not interacted with.
+  assert.equal(run([event => { event.preventDefault(); }], false), false);
+});
+test('tab sections follow the tab strip and split on each group change',()=>{
+  const tab=(id,index,groupId)=>({id,index,groupId});
+  const sections=tabSections([tab(5,4,-1),tab(1,0,-1),tab(2,1,7),tab(3,2,7),tab(4,3,8),tab(6,5,undefined)],
+    [{id:7,title:'home',color:'red'}]);
+  assert.deepEqual(sections.map(s=>s.tabs.map(t=>t.id)),[[1],[2,3],[4],[5,6]]);
+  assert.equal(sections[0].group,null);
+  assert.equal(sections[1].group.title,'home');
+  // A group Chrome did not report (just created) still gets its own section.
+  assert.deepEqual(sections[2].group,{id:8});
+  assert.equal(sections[3].group,null);
+});
+test('away intervals merge, prune after the keep window, and are subtracted from inactivity',()=>{
+  let away=addAway([],100,200);
+  away=addAway(away,150,300);away=addAway(away,400,500);away=addAway(away,500,450);
+  assert.deepEqual(away,[[100,300],[400,500]]);
+  assert.equal(awayTime(away,0,1000),300);assert.equal(awayTime(away,250,450),100);
+  assert.deepEqual(addAway(away,600,700,700+AWAY_KEEP_MS-50),[[600,700]]);
+  const h=3600000, now=100*h;
+  const tabs=[{id:1,lastAccessed:now-62*h},{id:2,lastAccessed:now-70*h}];
+  const weekend=[[now-61*h,now-1*h]];
+  assert.deepEqual(inactiveTabs(tabs,{},now,INACTIVE_MS,weekend),[]);
+  assert.deepEqual(inactiveTabs(tabs,{},now,9*h,weekend).map(t=>[t.id,t.idle]),[[2,10*h]]);
+  assert.deepEqual(inactiveTabs(tabs,{},now,0,weekend).map(t=>t.idle),[10*h,2*h]);
+  assert.deepEqual(inactiveTabs(tabs,{},now).map(t=>t.idle),[70*h,62*h]);
 });

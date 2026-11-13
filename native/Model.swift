@@ -107,3 +107,29 @@ func encodeFrame(_ object: [String: Any]) throws -> Data {
     data.append(json)
     return data
 }
+
+// Where a captured viewport sits in a Chrome window, in top-left (CoreGraphics) screen coordinates:
+// full window width, anchored to the window bottom, below the tab strip and toolbar.
+func previewFrame(window: CGRect, image: CGSize, viewport: CGSize? = nil) -> CGRect {
+    guard window.width > 0, window.height > 0, image.width > 0, image.height > 0 else { return .zero }
+    // Chrome's page area sits in the window's bottom-right corner, beside a left-hand tab drawer.
+    if let viewport, viewport.width > 0, viewport.height > 0 {
+        let width = min(window.width, viewport.width), height = min(window.height, viewport.height)
+        return CGRect(x: window.maxX - width, y: window.maxY - height, width: width, height: height)
+    }
+    let height = min(window.height, window.width * image.height / image.width)
+    return CGRect(x: window.minX, y: window.maxY - height, width: window.width, height: height)
+}
+
+// A large preview is only valid for the page it was captured from.
+struct FullPreview {
+    let url: String
+    let data: Data
+}
+
+func decodeFullPreview(_ value: String) -> Data? {
+    let prefix = "data:image/jpeg;base64,"
+    guard value.hasPrefix(prefix), value.utf8.count <= 620_000,
+          let data = Data(base64Encoded: String(value.dropFirst(prefix.count))) else { return nil }
+    return data
+}

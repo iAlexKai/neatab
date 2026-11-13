@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Darwin
 
-let helperVersion = "1.2.0"
+let helperVersion = "2.7.0"
 
 func isCopyLinkShortcut(_ code: Int64, _ flags: CGEventFlags) -> Bool {
     code == 8 && flags.contains(.maskCommand) && flags.contains(.maskShift) &&
@@ -17,7 +17,7 @@ func writeLinkToClipboard(_ url: String, pasteboard: NSPasteboard = .general) ->
 }
 
 final class NativeWire {
-    private let output = DispatchQueue(label: "app.seven.output", qos: .userInteractive)
+    private let output = DispatchQueue(label: "app.neatab.output", qos: .userInteractive)
     func send(_ message: [String: Any]) {
         guard let data = try? encodeFrame(message) else { return }
         output.async {
@@ -61,6 +61,7 @@ final class NativeWire {
 final class Switcher: NSObject, NSApplicationDelegate {
     let wire = NativeWire()
     let panel = SwitchPanel()
+    let previewPanel = PreviewPanel()
     let copyToast = CopyToastPanel()
     var items: [TabItem] = []
     var session = SwitchSession()
@@ -79,6 +80,15 @@ final class Switcher: NSObject, NSApplicationDelegate {
     var keyToDraw: [Double] = []
     var commitLatency: [Double] = []
     var imageStrings: [Int: String] = [:]
+    // Large previews stay as JPEG bytes; only the ones shown during a hold are decoded.
+    var fullPreviews: [Int: FullPreview] = [:]
+    var decodedPreviews: [Int: CGImage] = [:]
+    var holdWindow: CGRect?
+    var viewport: CGSize?
+    var landingToken: String?
+    var landingTimer: Timer?
+    // macOS memory pressure is forwarded so the extension can release idle tabs early.
+    let memoryPressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -97,6 +107,12 @@ final class Switcher: NSObject, NSApplicationDelegate {
         })
         refreshPermission()
         wire.send(["type": "ready", "version": helperVersion, "trusted": lastTrusted, "error": lastStatusError])
+        memoryPressure.setEventHandler { [weak self] in
+            guard let self else { return }
+            let level = self.memoryPressure.data.contains(.critical) ? "critical" : "warning"
+            self.wire.send(["type": "memory-pressure", "level": level])
+        }
+        memoryPressure.resume()
         permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             self?.refreshPermission()
         }
@@ -104,6 +120,7 @@ final class Switcher: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         permissionTimer?.invalidate()
+        memoryPressure.cancel()
         if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: false) }
         if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
     }
@@ -228,12 +245,29 @@ final class Switcher: NSObject, NSApplicationDelegate {
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
                 NSWorkspace.shared.open(url)
             }
+        case "full-preview":
+            guard let id = message["tabId"] as? Int, let url = message["url"] as? String,
+                  let value = message["data"] as? String, let data = decodeFullPreview(value) else { return }
+            fullPreviews[id] = FullPreview(url: url, data: data)
+            decodedPreviews.removeValue(forKey: id)
+        case "viewport":
+            guard let width = (message["width"] as? NSNumber)?.doubleValue,
+                  let height = (message["height"] as? NSNumber)?.doubleValue else { return }
+            viewport = CGSize(width: width, height: height)
+            // Chrome answers just after the hold starts; correct a preview drawn from the older size.
+            if panel.isVisible { showPreview() }
+        case "landed":
+            if let token = message["token"] as? String, token == landingToken {
+                // Give Chrome a frame or two to paint the activated page before revealing it.
+                scheduleLanding(after: 0.08)
+            }
         case "committed":
             if let token = message["token"] as? String, let start = commitStarted.removeValue(forKey: token) {
                 record(&commitLatency, (ProcessInfo.processInfo.systemUptime - start) * 1000)
             }
         case "commit-error":
             commitStarted.removeAll()
+            endLanding(); previewPanel.hide()
             NSSound.beep()
         case "copy-url-result":
             guard let id = message["requestId"] as? String,
@@ -268,17 +302,62 @@ final class Switcher: NSObject, NSApplicationDelegate {
             panel.overlay.images[item.id] = image
             imageStrings[item.id] = value
         }
+        // A large preview lives as long as its card image: same tab, same page.
+        let byId = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        fullPreviews = fullPreviews.filter { byId[$0.key]?.preview != nil && byId[$0.key]?.url == $0.value.url }
+        decodedPreviews = decodedPreviews.filter { fullPreviews[$0.key] != nil }
+    }
+
+    func showPreview() {
+        guard let item = session.selected, let window = holdWindow,
+              let preview = fullPreviews[item.id], preview.url == item.url, let image = decodedPreview(item.id, preview) else {
+            previewPanel.hide(); return
+        }
+        let rect = previewFrame(window: window, image: CGSize(width: image.width, height: image.height), viewport: viewport)
+        let desktopHeight = NSScreen.screens.first?.frame.maxY ?? 0
+        previewPanel.show(image, frame: NSRect(x: rect.minX, y: desktopHeight - rect.maxY, width: rect.width, height: rect.height))
+    }
+
+    func decodedPreview(_ id: Int, _ preview: FullPreview) -> CGImage? {
+        if let image = decodedPreviews[id] { return image }
+        guard let source = CGImageSourceCreateWithData(preview.data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+              image.width <= 2000, image.height <= 2000 else { return nil }
+        decodedPreviews[id] = image
+        return image
+    }
+
+    func scheduleLanding(after delay: TimeInterval) {
+        landingTimer?.invalidate()
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            self?.endLanding(); self?.previewPanel.fadeOut()
+        }
+        landingTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func endLanding() {
+        landingTimer?.invalidate(); landingTimer = nil; landingToken = nil
+        // Only the previews of an active hold stay decoded.
+        decodedPreviews.removeAll()
     }
 
     func draw() {
+        // The preview goes first: the card strip is ordered above it on every redraw.
         if panel.isVisible, let screen = panel.screen {
+            showPreview()
             panel.present(items: session.items, selected: session.index, screen: screen)
             return
         }
-        panel.present(items: session.items, selected: session.index, screen: chromeScreen())
+        endLanding()
+        holdWindow = chromeWindowRect()
+        let screen = chromeScreen()
+        showPreview()
+        panel.present(items: session.items, selected: session.index, screen: screen)
     }
 
-    func chromeScreen() -> NSScreen {
+    // The frontmost Chrome window in top-left screen coordinates.
+    func chromeWindowRect() -> CGRect? {
         let chromePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let windowInfo = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
         let chromeWindow = windowInfo?.first(where: {
@@ -286,7 +365,11 @@ final class Switcher: NSObject, NSApplicationDelegate {
             ($0[kCGWindowLayer as String] as? Int) == 0
         })
         let bounds = chromeWindow?[kCGWindowBounds as String] as? [String: Any]
-        let windowRect = bounds.flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
+        return bounds.flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary) }
+    }
+
+    func chromeScreen() -> NSScreen {
+        let windowRect = holdWindow ?? chromeWindowRect()
         let desktopHeight = NSScreen.screens.first?.frame.maxY ?? 0
         let chromeCenter = windowRect.map { NSPoint(x: $0.midX, y: desktopHeight - $0.midY) }
         return NSScreen.screens.first(where: { $0.frame.contains(chromeCenter ?? NSEvent.mouseLocation) })
@@ -299,6 +382,11 @@ final class Switcher: NSObject, NSApplicationDelegate {
         token += 1
         let key = String(token)
         commitStarted = [key: ProcessInfo.processInfo.systemUptime]
+        if previewPanel.isVisible {
+            // Keep the preview over the old page until Chrome reports the new one; never longer than 1.6 s.
+            landingToken = key
+            scheduleLanding(after: 1.6)
+        }
         wire.send(["type": "select", "tabId": id, "token": key])
         wire.send(["type": "busy", "value": false])
     }
@@ -309,6 +397,7 @@ final class Switcher: NSObject, NSApplicationDelegate {
         let wasOpen = session.isOpen || panel.isVisible
         session.cancel()
         panel.orderOut(nil)
+        endLanding(); previewPanel.hide()
         if wasOpen { wire.send(["type": "busy", "value": false]) }
     }
 
@@ -325,7 +414,7 @@ final class Switcher: NSObject, NSApplicationDelegate {
             return "\(values.count) 次；P95 \(String(format: "%0.2f", p95)) ms"
         }
         let alert = NSAlert()
-        alert.messageText = "Seven · 本机性能"
+        alert.messageText = "Neatab · 本机性能"
         alert.informativeText = "按键处理至绘制提交：\(summary(keyToDraw))\n松键至 Chrome 激活 API 返回：\(summary(commitLatency))\n\n前者不包含显示器扫描输出，后者不代表目标网页完成绘制。仅统计本次连接的最近 100 次操作；不写入磁盘或上传。"
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
@@ -389,6 +478,20 @@ func selfTest() throws {
     check(!copies.accept(cancelled, at: 3.1), "leaving Chrome cancels pending copy")
     let expired = copies.begin(at: 4)
     check(!copies.accept(expired, at: 8), "expired copy cannot overwrite a later clipboard action")
+    let window = CGRect(x: 100, y: 50, width: 1400, height: 900)
+    check(previewFrame(window: window, image: CGSize(width: 1600, height: 880)) ==
+          CGRect(x: 100, y: 180, width: 1400, height: 770), "preview fills width below the toolbar")
+    check(previewFrame(window: window, image: CGSize(width: 800, height: 900)) == window, "tall preview is clamped to the window")
+    check(previewFrame(window: .zero, image: CGSize(width: 10, height: 10)) == .zero, "no window, no preview")
+    let image = CGSize(width: 1600, height: 880)
+    check(previewFrame(window: window, image: image, viewport: CGSize(width: 1120, height: 780)) ==
+          CGRect(x: 380, y: 170, width: 1120, height: 780), "preview covers only the page area beside a left drawer")
+    check(previewFrame(window: window, image: image, viewport: CGSize(width: 2000, height: 2000)) == window, "page area is clamped to the window")
+    check(previewFrame(window: window, image: image, viewport: .zero) ==
+          previewFrame(window: window, image: image), "unknown page area falls back to the window width")
+    check(decodeFullPreview("data:image/jpeg;base64,/9j/") != nil, "JPEG preview accepted")
+    check(decodeFullPreview("data:image/png;base64,iVBO") == nil, "non-JPEG preview rejected")
+    check(decodeFullPreview("data:image/jpeg;base64," + String(repeating: "A", count: 700_000)) == nil, "oversized preview rejected")
     print("Native: \(count) checks passed")
 }
 
@@ -462,8 +565,8 @@ if CommandLine.arguments.contains("--self-test") {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     let alert = NSAlert()
-    alert.messageText = "Seven · 最近 7 个标签页"
-    alert.informativeText = "Seven 由 Chrome 扩展自动启动。\n\n1. 在 Chrome 加载 seven-extension 文件夹。\n2. 点击扩展图标，选择「开启辅助功能权限」。\n3. 在系统设置中允许 Seven。\n\n按住 Option，连按 Tab 选择；松开 Option 切换。\nCommand + Shift + C 复制当前网页链接。"
+    alert.messageText = "Neatab · 最近 7 个标签页"
+    alert.informativeText = "Neatab 由 Chrome 扩展自动启动。\n\n1. 在 Chrome 加载 neatab-extension 文件夹。\n2. 点击扩展图标，选择「开启辅助功能权限」。\n3. 在系统设置中允许 Neatab。\n\n按住 Option，连按 Tab 选择；松开 Option 切换。\nCommand + Shift + C 复制当前网页链接。"
     alert.addButton(withTitle: "好")
     app.activate(ignoringOtherApps: true)
     alert.runModal()

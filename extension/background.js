@@ -1,9 +1,9 @@
-import { RecentTabs, LIMIT, safeURL, inactiveTabs, duplicateTabs, lastActive, INACTIVE_MS } from './core.mjs';
+import { RecentTabs, LIMIT, safeURL, inactiveTabs, duplicateTabs, lastActive, INACTIVE_MS, discardCandidates, wouldPromptOnLeave, DISCARD_CHOICES, DISCARD_MINUTES, PRESSURE_IDLE_MS, addAway, AWAY_IDLE_SECONDS } from './core.mjs';
 
-const HOST = 'app.seven.switcher';
+const HOST = 'app.neatab.helper';
 const model = new RecentTabs();
 const previews = new Map();
-let settings = {scope: 'all', previews: true};
+let settings = {scope: 'all', previews: true, autoDiscard: true, discardAfter: DISCARD_MINUTES};
 let nativePort = null;
 let nativeState = {connected: false, trusted: false, version: '', error: ''};
 let revision = 0;
@@ -23,15 +23,46 @@ let publishTimer;
 let seen = {};
 const activeByWindow = new Map();
 const MANAGER_PAGE = chrome.runtime.getURL('tabs.html');
+const DISCARD_ALARM = 'auto-discard';
+// Away time is left out of inactivity. A heartbeat gap catches sleep and a closed Chrome.
+const HEARTBEAT_ALARM = 'heartbeat';
+const HEARTBEAT_GAP = 15 * 60000;
+let away = [];
+let awaySince = null;
+let alive = 0;
+let discardRunning = false;
+let discardSummary = {time: 0, discarded: 0, prompted: 0, unchecked: 0, trigger: ''};
+// Tabs Chrome restored at startup that the user has not opened since. Session-scoped like tab ids.
+let fresh = new Set();
+let freshTimer;
+let lastPressure = 0;
+// Previews are kept on this device, keyed by URL, so tabs restored after a browser, extension or
+// worker restart (and duplicate copies of a page) have one before the user lands on them again.
+const STORED_PREFIX = 'preview:';
+const STORED_LIMIT = LIMIT + 3;
+const STORED_TTL = 7 * 24 * 3600 * 1000;
+let stored = new Map(); // url -> capture time
+const hydrating = new Set();
 
 const ready = initialize();
 
 async function initialize() {
   const [saved, preferences, windows] = await Promise.all([
-    chrome.storage.session.get(['order', 'seen', 'active']), chrome.storage.local.get('settings'),
+    chrome.storage.session.get(['order', 'seen', 'active', 'fresh']), chrome.storage.local.get(['settings', 'previewIndex', 'away', 'awaySince', 'alive']),
     chrome.windows.getAll({windowTypes: ['normal']})
   ]);
   settings = {...settings, ...preferences.settings};
+  if (!DISCARD_CHOICES.includes(settings.discardAfter)) settings.discardAfter = DISCARD_MINUTES;
+  fresh = new Set(saved.fresh || []);
+  away = Array.isArray(preferences.away) ? preferences.away : [];
+  awaySince = Number.isFinite(preferences.awaySince) ? preferences.awaySince : null;
+  alive = Number.isFinite(preferences.alive) ? preferences.alive : 0;
+  await startAwayTracking();
+  const index = Array.isArray(preferences.previewIndex) ? preferences.previewIndex : [];
+  stored = new Map(index.filter(([url, time]) => typeof url === 'string' && Date.now() - time < STORED_TTL));
+  const expired = index.filter(([url]) => !stored.has(url)).map(([url]) => STORED_PREFIX + url);
+  if (!settings.previews) void clearStoredPreviews();
+  else if (expired.length) void chrome.storage.local.remove(expired).catch(() => {});
   model.order = saved.order || [];
   const tabs = (await Promise.all(windows.map(w => chrome.tabs.query({windowId: w.id})))).flat();
   model.reconcile(tabs);
@@ -51,6 +82,7 @@ async function initialize() {
   connectNative();
   queuePublish();
   scheduleCapture();
+  await scheduleAutoDiscard();
 }
 
 function connectNative() {
@@ -65,13 +97,17 @@ function connectNative() {
         nativeState = {connected: true, trusted: !!message.trusted,
           version: message.version || '', error: message.error || ''};
         publish();
+        // A fresh helper process has no large previews yet.
+        if (message.type === 'ready') sendFullPreviews();
       } else if (message.type === 'select' && Number.isInteger(message.tabId)) {
         void activate(message.tabId, message.token);
       } else if (message.type === 'copy-url' && typeof message.requestId === 'string' && message.requestId.length <= 64) {
         void copyCurrentURL(message.requestId);
+      } else if (message.type === 'memory-pressure') {
+        void releaseUnderPressure(message.level);
       } else if (message.type === 'busy') {
         busy = !!message.value;
-        if (busy) clearTimeout(captureTimer);
+        if (busy) { clearTimeout(captureTimer); void sendViewport(); }
         else scheduleCapture();
       }
     });
@@ -113,6 +149,7 @@ function snapshot() {
   const tabs = model.recent(settings.scope, focusedWindow);
   const keep = new Set(tabs.map(t => t.id));
   for (const id of previews.keys()) if (!keep.has(id)) previews.delete(id);
+  for (const tab of tabs) hydrate(tab);
   return {type: 'snapshot', revision: ++revision, limit: LIMIT, enabled: profileFocused,
     liveIds: [...model.tabs.keys()],
     items: tabs.map(t => ({id: t.id, windowId: t.windowId, title: (t.title || '新标签页').slice(0, 500),
@@ -128,7 +165,7 @@ function queuePublish() {
 
 function publish() {
   send(snapshot());
-  void chrome.storage.session.set({order: model.order, seen, active: [...activeByWindow]}).catch(() => {});
+  void chrome.storage.session.set({order: model.order, seen, active: [...activeByWindow], fresh: [...fresh]}).catch(() => {});
 }
 
 function scheduleCapture() {
@@ -158,6 +195,7 @@ async function capture() {
     const window = await chrome.windows.get(windowId).catch(() => null);
     if (!window?.focused) return;
     const [tab] = await chrome.tabs.query({active: true, windowId});
+    if (tab?.width > 0 && tab?.height > 0) send({type: 'viewport', width: tab.width, height: tab.height});
     if (busy || !settings.previews || generation !== captureGeneration) return;
     if (!tab || tab.incognito || !['http:', 'https:', 'file:'].includes(safeURL(tab.url))) return;
     if (!model.recent(settings.scope, focusedWindow).some(t => t.id === tab.id)) return;
@@ -169,15 +207,87 @@ async function capture() {
     const [current] = await chrome.tabs.query({active: true, windowId});
     if (busy || !settings.previews || generation !== captureGeneration ||
         current?.id !== tab.id || current?.url !== tab.url || focusedWindow !== windowId) return;
-    const compact = await compactPreview(data);
+    const [compact, full] = await Promise.all([compactPreview(data), fullPreview(data)]);
     if (!compact || busy || !settings.previews || generation !== captureGeneration ||
         model.tabs.get(tab.id)?.url !== tab.url) return;
     if (model.recent(settings.scope, focusedWindow).some(t => t.id === tab.id)) {
-      previews.set(tab.id, {data: compact, url: tab.url, time: Date.now()});
+      previews.set(tab.id, {data: compact, full, url: tab.url, time: Date.now()});
+      void storePreview(tab.url, compact, full);
+      if (full) send({type: 'full-preview', tabId: tab.id, url: tab.url, data: full});
       queuePublish();
     }
   } catch { /* Restricted pages use a deliberate title/domain card. */ }
   finally { captureInFlight = false; }
+}
+
+function hydrate(tab) {
+  const url = tab.url;
+  if (!settings.previews || !stored.has(url) || previews.get(tab.id)?.url === url || hydrating.has(url)) return;
+  hydrating.add(url);
+  const key = STORED_PREFIX + url;
+  void chrome.storage.local.get(key).then(({[key]: entry}) => {
+    // The tab may have navigated, been captured afresh or previews turned off meanwhile.
+    if (!entry?.data || !settings.previews || model.tabs.get(tab.id)?.url !== url || previews.get(tab.id)?.url === url) return;
+    previews.set(tab.id, {data: entry.data, full: entry.full, url, time: entry.time});
+    if (entry.full) send({type: 'full-preview', tabId: tab.id, url, data: entry.full});
+    queuePublish();
+  }).catch(() => {}).finally(() => hydrating.delete(url));
+}
+
+async function storePreview(url, data, full) {
+  const time = Date.now();
+  stored.delete(url); stored.set(url, time);
+  const evicted = [...stored.keys()].slice(0, Math.max(0, stored.size - STORED_LIMIT));
+  for (const old of evicted) stored.delete(old);
+  try {
+    // Free space first: about 10 entries of up to 720 KB fit Chrome's 10 MB local quota.
+    if (evicted.length) await chrome.storage.local.remove(evicted.map(old => STORED_PREFIX + old));
+    if (!settings.previews) return;
+    await chrome.storage.local.set({[STORED_PREFIX + url]: {data, full, time}, previewIndex: [...stored]});
+  } catch { /* A full quota only costs the cached preview. */ }
+}
+
+async function clearStoredPreviews() {
+  const keys = [...stored.keys()].map(url => STORED_PREFIX + url);
+  stored.clear();
+  try { await chrome.storage.local.remove([...keys, 'previewIndex']); } catch { /* best effort */ }
+}
+
+// The page area excludes Chrome's toolbars and any side drawer, so the helper can cover just that.
+async function sendViewport() {
+  const [tab] = await chrome.tabs.query({active: true, windowId: focusedWindow}).catch(() => []);
+  if (tab?.width > 0 && tab?.height > 0) send({type: 'viewport', width: tab.width, height: tab.height});
+}
+
+function sendFullPreviews() {
+  if (!settings.previews) return;
+  for (const [tabId, preview] of previews)
+    if (preview.full) send({type: 'full-preview', tabId, url: preview.url, data: preview.full});
+}
+
+// The Option + Tab full-window preview: the viewport at up to 1600 px wide, bounded to 450 KB.
+// Sent once per capture as its own message; snapshots only carry the small card image.
+async function fullPreview(data) {
+  const response = await fetch(data);
+  const bitmap = await createImageBitmap(await response.blob());
+  try {
+    const scale = Math.min(1, 1600 / bitmap.width);
+    const width = Math.round(bitmap.width * scale), height = Math.round(bitmap.height * scale);
+    const canvas = new OffscreenCanvas(width, height);
+    canvas.getContext('2d', {alpha: false}).drawImage(bitmap, 0, 0, width, height);
+    for (const quality of [.62, .45]) {
+      const blob = await canvas.convertToBlob({type: 'image/jpeg', quality});
+      if (blob.size <= 450000) return toDataURL(blob);
+    }
+    return null;
+  } finally { bitmap.close(); }
+}
+
+async function toDataURL(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  return 'data:image/jpeg;base64,' + btoa(binary);
 }
 
 async function compactPreview(data) {
@@ -192,10 +302,7 @@ async function compactPreview(data) {
       bitmap.width * scale, bitmap.height * scale);
     const blob = await canvas.convertToBlob({type: 'image/jpeg', quality: .55});
     if (blob.size > 90000) return null;
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-    return 'data:image/jpeg;base64,' + btoa(binary);
+    return toDataURL(blob);
   } finally { bitmap.close(); }
 }
 
@@ -205,15 +312,120 @@ async function openTabs() {
 }
 
 async function inactiveList(threshold) {
-  return inactiveTabs(await openTabs(), seen, Date.now(), threshold);
+  return inactiveTabs(await openTabs(), seen, Date.now(), threshold, awayNow());
+}
+
+// Includes a stretch of absence that is still going on.
+function awayNow() {
+  const now = Date.now();
+  return awaySince === null ? away : addAway(away, awaySince, now, now);
+}
+
+async function startAwayTracking() {
+  chrome.idle.setDetectionInterval(AWAY_IDLE_SECONDS);
+  const state = await chrome.idle.queryState(AWAY_IDLE_SECONDS).catch(() => 'active');
+  heartbeat();
+  // A worker that slept through the return to the computer closes the absence now.
+  if (state === 'active') markAway('active');
+  else saveAway();
+  if (!await chrome.alarms.get(HEARTBEAT_ALARM)) await chrome.alarms.create(HEARTBEAT_ALARM, {periodInMinutes: 5});
+}
+
+// Alarms stop while the Mac sleeps or Chrome is closed; the gap since the last beat was time away.
+function heartbeat() {
+  const now = Date.now();
+  if (alive && now - alive > HEARTBEAT_GAP) away = addAway(away, alive, now);
+  alive = now;
+  saveAway();
+}
+
+function markAway(state) {
+  const now = Date.now();
+  if (state === 'active') {
+    if (awaySince !== null) away = addAway(away, awaySince, now);
+    awaySince = null;
+  } else if (awaySince === null) {
+    // 'idle' fires after the detection interval without input; the user left that long ago.
+    awaySince = state === 'idle' ? now - AWAY_IDLE_SECONDS * 1000 : now;
+  }
+  saveAway();
+}
+
+function saveAway() {
+  void chrome.storage.local.set({away, awaySince, alive}).catch(() => {});
 }
 
 async function allTabs() {
   const tabs = await openTabs();
   const {keep, close} = duplicateTabs(tabs, seen);
   return tabs.map(t => ({id: t.id, windowId: t.windowId, index: t.index, title: (t.title || '新标签页').slice(0, 500),
-    url: (t.url || '').slice(0, 4096), active: !!t.active, pinned: !!t.pinned, lastActive: lastActive(t, seen),
+    url: (t.url || '').slice(0, 4096), active: !!t.active, pinned: !!t.pinned, discarded: !!t.discarded,
+    groupId: t.groupId ?? -1,
+    lastActive: lastActive(t, seen),
     duplicate: close.has(t.id) ? 'close' : keep.has(t.id) ? 'keep' : ''}));
+}
+
+// A failed lookup only costs the group names and colors, never the tab list.
+async function tabGroups() {
+  const groups = await chrome.tabGroups.query({}).catch(() => []);
+  return groups.map(g => ({id: g.id, title: (g.title || '').slice(0, 200), color: g.color}));
+}
+
+async function scheduleAutoDiscard() {
+  if (!settings.autoDiscard) { await chrome.alarms.clear(DISCARD_ALARM); return; }
+  // Keep an existing alarm so a worker restart does not push the next check back, unless it is
+  // left over from a version that checked less often.
+  if ((await chrome.alarms.get(DISCARD_ALARM))?.periodInMinutes !== 5)
+    await chrome.alarms.create(DISCARD_ALARM, {delayInMinutes: 1, periodInMinutes: 5});
+}
+
+// Discarding skips beforeunload, so a page never gets to warn about unsaved input. Ask the page
+// whether closing it would show "Leave site?"; if so, or if it cannot be asked (chrome:// pages,
+// the Web Store, a hung frame), it is kept.
+async function leaveCheck(tabId) {
+  let timer;
+  try {
+    const results = await Promise.race([
+      chrome.scripting.executeScript({target: {tabId, allFrames: true}, world: 'MAIN', func: wouldPromptOnLeave}),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 3000); })]);
+    if (!results.length) return 'unchecked';
+    return results.some(frame => frame.result !== false) ? 'prompt' : 'clear';
+  } catch { return 'unchecked'; }
+  finally { clearTimeout(timer); }
+}
+
+async function autoDiscard(threshold = settings.discardAfter * 60000, trigger = 'idle') {
+  if (!settings.autoDiscard || discardRunning) return;
+  discardRunning = true;
+  const counts = {discarded: 0, prompted: 0, unchecked: 0};
+  try {
+    for (const tab of discardCandidates(await openTabs(), seen, Date.now(), threshold, fresh)) {
+      const check = await leaveCheck(tab.id);
+      if (check !== 'clear') { counts[check === 'prompt' ? 'prompted' : 'unchecked'] += 1; continue; }
+      // The page check is async: the user may have opened or reloaded the tab meanwhile.
+      const current = await chrome.tabs.get(tab.id).catch(() => null);
+      if (!settings.autoDiscard || !current || !discardCandidates([current], seen, Date.now(), threshold, fresh).length) continue;
+      try { await chrome.tabs.discard(tab.id); counts.discarded += 1; fresh.delete(tab.id); } catch { counts.unchecked += 1; }
+    }
+  } finally {
+    discardRunning = false;
+    discardSummary = {time: Date.now(), ...counts, trigger};
+  }
+}
+
+// macOS reported memory pressure (through the helper): release tabs unused for a short while.
+async function releaseUnderPressure(level) {
+  await ready;
+  const threshold = PRESSURE_IDLE_MS[level];
+  if (!threshold || Date.now() - lastPressure < 60000) return;
+  lastPressure = Date.now();
+  await autoDiscard(threshold, 'pressure');
+}
+
+// Restored tabs load in the background right after Chrome starts. Release each once it has loaded.
+function releaseFreshSoon() {
+  clearTimeout(freshTimer);
+  if (settings.autoDiscard && fresh.size) freshTimer = setTimeout(() => void autoDiscard(undefined, 'startup'), 3000);
 }
 
 async function closeTargets(targets) {
@@ -272,6 +484,8 @@ async function activate(tabId, token = '') {
     model.update(tab);
     model.touch(tabId);
     send({type: 'committed', token, tabId, elapsedMs: performance.now() - started});
+    // The helper keeps its full-window preview up until the page has something to show.
+    if (token) void waitForLoad(tabId).then(() => send({type: 'landed', token, tabId}));
     queuePublish();
     scheduleCapture();
     return {ok: true};
@@ -285,7 +499,25 @@ async function activate(tabId, token = '') {
   }
 }
 
+function waitForLoad(tabId, timeout = 1500) {
+  return new Promise(resolve => {
+    const done = () => { chrome.tabs.onUpdated.removeListener(listener); clearTimeout(timer); resolve(); };
+    const listener = (id, changes) => { if (id === tabId && changes.status === 'complete') done(); };
+    const timer = setTimeout(done, timeout);
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then(tab => { if (!tab.status || tab.status === 'complete') done(); }, done);
+  });
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  void ready.then(async () => {
+    const tabs = await openTabs();
+    fresh = new Set(tabs.filter(t => !t.active).map(t => t.id));
+    publish(); releaseFreshSoon();
+  });
+});
 chrome.tabs.onActivated.addListener(info => {
+  if (fresh.delete(info.tabId)) queuePublish();
   const generation = (activationGenerations.get(info.windowId) || 0) + 1;
   activationGenerations.set(info.windowId, generation);
   invalidateCapture();
@@ -332,6 +564,7 @@ chrome.tabs.onUpdated.addListener((id, changes, tab) => {
     }
     if (['url', 'title', 'audible', 'discarded', 'status'].some(k => k in changes)) queuePublish();
     if (tab.active && changes.status === 'complete') scheduleCapture();
+    if (changes.status === 'complete' && fresh.has(id)) releaseFreshSoon();
   });
 });
 chrome.tabs.onCreated.addListener(tab => { void ready.then(() => {
@@ -340,7 +573,7 @@ chrome.tabs.onCreated.addListener(tab => { void ready.then(() => {
   queuePublish(); scheduleCapture();
 }); });
 chrome.tabs.onRemoved.addListener(id => { void ready.then(() => {
-  model.remove(id); previews.delete(id); delete seen[id]; queuePublish();
+  model.remove(id); previews.delete(id); delete seen[id]; fresh.delete(id); queuePublish();
 }); });
 chrome.tabs.onAttached.addListener((id, info) => { void ready.then(async () => {
   const tab = await chrome.tabs.get(id).catch(() => null);
@@ -357,19 +590,27 @@ chrome.tabs.onReplaced.addListener((added, removed) => { void ready.then(async (
   queuePublish();
 }); });
 
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === DISCARD_ALARM) void ready.then(autoDiscard);
+  else if (alarm.name === HEARTBEAT_ALARM) void ready.then(heartbeat);
+});
+chrome.idle.onStateChanged.addListener(state => {
+  void ready.then(() => markAway(state));
+});
+
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Only packaged UI (popup or the inactive-tabs page) can invoke controls. No content scripts exist.
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) return;
   void ready.then(async () => {
     if (message.type === 'state') {
       const tabs = await openTabs();
-      respond({items: snapshot().items, settings, native: nativeState,
-        inactiveCount: inactiveTabs(tabs, seen, Date.now()).length, duplicateCount: duplicateTabs(tabs, seen).close.size});
+      respond({items: snapshot().items, settings, native: nativeState, discardSummary,
+        inactiveCount: inactiveTabs(tabs, seen, Date.now(), INACTIVE_MS, awayNow()).length, duplicateCount: duplicateTabs(tabs, seen).close.size});
     }
     else if (message.type === 'inactive') respond({ok: true, now: Date.now(),
       items: (await inactiveList(0)).map(t => ({id: t.id, windowId: t.windowId, title: (t.title || '新标签页').slice(0, 500),
-        url: (t.url || '').slice(0, 4096), lastActive: t.lastActive, discarded: !!t.discarded}))});
-    else if (message.type === 'all-tabs') respond({ok: true, now: Date.now(), items: await allTabs()});
+        url: (t.url || '').slice(0, 4096), lastActive: t.lastActive, idle: t.idle, discarded: !!t.discarded}))});
+    else if (message.type === 'all-tabs') respond({ok: true, now: Date.now(), items: await allTabs(), groups: await tabGroups()});
     else if (message.type === 'close-inactive') respond(await closeInactive(message.ids, message.minIdle));
     else if (message.type === 'close-duplicates') respond(await closeDuplicates(message.ids));
     else if (message.type === 'close-tab') respond(await closeTab(message.id));
@@ -377,9 +618,12 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     else if (message.type === 'activate') respond(await activate(message.tabId));
     else if (message.type === 'settings') {
       invalidateCapture();
-      settings = {scope: message.scope === 'window' ? 'window' : 'all', previews: message.previews !== false};
-      if (!settings.previews) { previews.clear(); clearTimeout(captureTimer); }
-      await chrome.storage.local.set({settings}); publish(); scheduleCapture(); respond({ok: true});
+      settings = {scope: message.scope === 'window' ? 'window' : 'all', previews: message.previews !== false,
+        autoDiscard: message.autoDiscard !== false,
+        discardAfter: DISCARD_CHOICES.includes(message.discardAfter) ? message.discardAfter : DISCARD_MINUTES};
+      if (!settings.previews) { previews.clear(); clearTimeout(captureTimer); await clearStoredPreviews(); }
+      await chrome.storage.local.set({settings}); publish(); scheduleCapture(); await scheduleAutoDiscard();
+      respond({ok: true});
     } else if (message.type === 'reconnect') {
       nativePort?.disconnect(); nativePort = null; connectNative(); respond({ok: true});
     } else if (message.type === 'permission') { send({type: 'request-permission'}); respond({ok: true}); }

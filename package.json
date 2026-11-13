@@ -1,6 +1,6 @@
 {
-  "name": "seven-tab-switcher",
-  "version": "1.5.0",
+  "name": "neatab",
+  "version": "2.7.0",
   "private": true,
   "type": "module",
   "scripts": {

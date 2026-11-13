@@ -1,17 +1,30 @@
-import {cpSync,mkdirSync,readFileSync,writeFileSync,chmodSync,rmSync} from 'node:fs';
+import {cpSync,existsSync,mkdirSync,readFileSync,writeFileSync,chmodSync,rmSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 const root=fileURLToPath(new URL('../',import.meta.url));
-const dest=root+'dist/Seven';
+const dest=root+'dist/Neatab';
 mkdirSync(root+'dist',{recursive:true});
 rmSync(dest,{recursive:true,force:true});mkdirSync(dest);
-cpSync(root+'extension',dest+'/seven-extension',{recursive:true});
-cpSync(root+'build/Seven.app',dest+'/Seven.app',{recursive:true});
-cpSync(root+'scripts/install.command',dest+'/安装 Seven.command');
-cpSync(root+'scripts/uninstall.command',dest+'/卸载 Seven.command');
+cpSync(root+'extension',dest+'/neatab-extension',{recursive:true});
+cpSync(root+'build/Neatab.app',dest+'/Neatab.app',{recursive:true});
+cpSync(root+'scripts/install.command',dest+'/安装 Neatab.command');
+cpSync(root+'scripts/uninstall.command',dest+'/卸载 Neatab.command');
 cpSync(root+'README.md',dest+'/使用说明.md');
 cpSync(root+'VALIDATION.md',dest+'/验收清单.md');
 cpSync(root+'extension-id.txt',dest+'/extension-id.txt');
-chmodSync(dest+'/安装 Seven.command',0o755);chmodSync(dest+'/卸载 Seven.command',0o755);
-execFileSync('/usr/bin/ditto',['-c','-k','--sequesterRsrc','--keepParent',dest,root+'dist/Seven-macOS-'+process.arch+'.zip']);
+if(existsSync(root+'store-extension-id.txt'))cpSync(root+'store-extension-id.txt',dest+'/store-extension-id.txt');
+chmodSync(dest+'/安装 Neatab.command',0o755);chmodSync(dest+'/卸载 Neatab.command',0o755);
+execFileSync('/usr/bin/ditto',['-c','-k','--sequesterRsrc','--keepParent',dest,root+'dist/Neatab-macOS.zip']);
 console.log('Packaged '+dest);
+
+// Chrome Web Store upload: manifest at the zip root, without the `key` that pins the unpacked ID.
+const store=root+'dist/store/neatab';
+rmSync(root+'dist/store',{recursive:true,force:true});mkdirSync(store,{recursive:true});
+cpSync(root+'extension',store,{recursive:true,filter:path=>!path.endsWith('.DS_Store')});
+const manifest=JSON.parse(readFileSync(store+'/manifest.json','utf8'));
+delete manifest.key;
+writeFileSync(store+'/manifest.json',JSON.stringify(manifest,null,2)+'\n');
+const storeZip=root+`dist/Neatab-${manifest.version}-chrome-web-store.zip`;
+rmSync(storeZip,{force:true});
+execFileSync('/usr/bin/zip',['-q','-r','-X',storeZip,'.'],{cwd:store});
+console.log('Store upload '+storeZip);

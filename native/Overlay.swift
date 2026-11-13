@@ -230,3 +230,63 @@ final class SwitchPanel: NSPanel {
         NSAccessibility.post(element: overlay, notification: .valueChanged)
     }
 }
+
+// Covers Chrome's page area with the selected tab's large screenshot during a hold, and stays up
+// after release until the real page has painted, so the switch appears to land on the preview.
+final class PreviewPanel: NSPanel {
+    private let imageLayer = CALayer()
+    private var generation = 0
+
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isOpaque = true
+        backgroundColor = .windowBackgroundColor
+        hasShadow = false
+        // One step below the card strip, which must always stay on top of the preview.
+        level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue - 1)
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        isReleasedWhenClosed = false
+        hidesOnDeactivate = false
+        ignoresMouseEvents = true
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
+        view.wantsLayer = true
+        imageLayer.contentsGravity = .resizeAspectFill
+        imageLayer.masksToBounds = true
+        imageLayer.frame = view.bounds
+        imageLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        view.layer?.addSublayer(imageLayer)
+        contentView = view
+    }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    func show(_ image: CGImage, frame: NSRect) {
+        generation += 1
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        imageLayer.contents = image
+        CATransaction.commit()
+        alphaValue = 1
+        setFrame(frame, display: false)
+        orderFrontRegardless()
+    }
+
+    func fadeOut() {
+        guard isVisible else { return }
+        let fading = generation
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.12
+            animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self, self.generation == fading else { return }
+            self.hide()
+        })
+    }
+
+    func hide() {
+        generation += 1
+        orderOut(nil)
+        imageLayer.contents = nil
+        alphaValue = 1
+    }
+}

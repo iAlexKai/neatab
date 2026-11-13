@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-const path=fileURLToPath(new URL('../build/Seven.app/Contents/MacOS/Seven',import.meta.url));
+const path=fileURLToPath(new URL('../build/Neatab.app/Contents/MacOS/Neatab',import.meta.url));
 const child=spawn(path,['--native-host'],{stdio:['pipe','pipe','pipe']});
 let bytes=Buffer.alloc(0),messages=[],errors='';
 child.stderr.on('data',data=>errors+=data.toString());
